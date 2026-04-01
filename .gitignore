@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.dylib
+*.dll
+*.egg-info/
+dist/
+build/
+*.egg
+*.pyc
+
+# Fortran
+*.mod
+*.o
+*.obj
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Build directories
+build/
+python/ripplepy/_effective_ripple*.so
+fortran/*.mod
+fortran/pspline/*.mod
