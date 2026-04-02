@@ -10,7 +10,16 @@ except ImportError:
 
 # Import Python modules
 from .mgrid import MGrid
-from .ripple import get_bfield_matrix, initialize_mgrid_field
+from .ripple import (
+    AxisFinder,
+    FieldLineTracer,
+    MagneticField,
+)
 
 __version__ = "0.1.0"
-__all__ = ["MGrid", "initialize_mgrid_field", "get_bfield_matrix"]
+__all__ = [
+    "MGrid",
+    "MagneticField",
+    "FieldLineTracer",
+    "AxisFinder",
+]
