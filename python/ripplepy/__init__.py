@@ -14,6 +14,7 @@ from .ripple import (
     AxisFinder,
     FieldLineTracer,
     MagneticField,
+    epsilon_eff,
 )
 
 __version__ = "0.1.0"
@@ -22,4 +23,5 @@ __all__ = [
     "MagneticField",
     "FieldLineTracer",
     "AxisFinder",
+    "epsilon_eff",
 ]

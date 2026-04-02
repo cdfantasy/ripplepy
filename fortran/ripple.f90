@@ -156,8 +156,8 @@ contains
       nphi_trace = nphi_in
       npoints = nturn * nphi_trace
       
-      write(*,'(A,I0,A,I0,A,I0,A)') 'Trace parameters set: nturn=', nturn, &
-                                     ', nphi=', nphi_trace, ', npoints=', npoints
+      ! write(*,'(A,I0,A,I0,A,I0,A)') 'Trace parameters set: nturn=', nturn, &
+      !                                ', nphi=', nphi_trace, ', npoints=', npoints
     end subroutine set_trace_parameters
 
     !============================================================================
