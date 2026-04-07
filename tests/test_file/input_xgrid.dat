@@ -1,0 +1,14 @@
+&MGRID_NLI
+  TASK = 'MGRID'
+  MGRID_EXT = 'c09r00' ! For file coils.testcoil
+  MGRID_MODE = 'S'       ! (S)caled or (R)aw
+  LSTELL_SYM = T         ! Enforce flip-mirro symmetry
+  RMIN = 0.436            ! Minimum R extent of grid [m]
+  RMAX = 2.436            ! Maximum R extent of grid [m]
+  ZMIN = -1.0          ! Minimum Z extent of grid [m]
+  ZMAX = 1           ! Maximum Z extent of grid [m]
+  KP   = 36              ! Number of toroidal planes
+  IR   = 201             ! Number of R gridpoints
+  JZ   = 201             ! Number of Z gridpoints
+/
+end

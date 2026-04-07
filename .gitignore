@@ -36,3 +36,9 @@ build/
 python/ripplepy/_effective_ripple*.so
 fortran/*.mod
 fortran/pspline/*.mod
+
+# test
+
+mgrid*
+log_xgrid*
+extcur*
