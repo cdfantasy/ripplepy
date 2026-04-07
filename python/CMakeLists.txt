@@ -33,10 +33,8 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT ${F2PY_STAMP}
-    COMMAND ${F2PY_CMD}
+    COMMAND ${CMAKE_COMMAND} -E env FC=${CMAKE_Fortran_COMPILER} ${F2PY_CMD}
             -c
-            --fcompiler=gnu95
-            --f90exec=${CMAKE_Fortran_COMPILER}
             --f90flags=-I${FORTRAN_DIR}\ -I${FORTRAN_DIR}/pspline\ -I${FORTRAN_BINARY_DIR}
             --opt=-O3
             -m ${EXT_MODULE_NAME}

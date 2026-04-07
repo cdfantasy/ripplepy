@@ -1,0 +1,16 @@
+name: ripplepy
+channels:
+
+dependencies:
+  - gfortran
+  - cmake
+  - ninja
+  - meson
+  - make
+  - pkg-config
+  - python
+  - numpy
+  - scipy
+  - f90wrap
+  - scikit-build-core
+  - pip

@@ -3,6 +3,7 @@ requires = [
     "scikit-build-core>=0.10",
     "cmake>=3.18",
     "ninja>=1.10",
+    "meson>=1.0",
     "numpy>=1.19",
     "f90wrap>=0.2",
 ]
