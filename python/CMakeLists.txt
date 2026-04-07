@@ -49,6 +49,15 @@ add_custom_command(
 
 add_custom_target(ripplepy_python_ext ALL DEPENDS ${F2PY_STAMP})
 
+# Install pure-Python package modules from source tree.
+install(
+    FILES
+    ${PY_PACKAGE_DIR}/__init__.py
+    ${PY_PACKAGE_DIR}/mgrid.py
+    ${PY_PACKAGE_DIR}/ripple.py
+    DESTINATION ripplepy
+)
+
 # Install generated extension + generated helper module into package directory.
 install(
     DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/

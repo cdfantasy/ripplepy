@@ -30,11 +30,9 @@ class MagneticField:
             raise ImportError("Effective_Ripple was not imported successfully.")
 
         self.mgrid = mgrid
-        self.extcur = np.asarray(extcur, dtype=np.float64)
         self.full_torus = full_torus
         self.phimin = phimin
         self.phimax = phimax if phimax is not None else (2 * np.pi if full_torus else 2 * np.pi / mgrid.nfp)
-
         self.nr = mgrid.nr
         self.nz = mgrid.nz
         self.nphi = mgrid.nphi
@@ -43,6 +41,7 @@ class MagneticField:
         self.zmin = mgrid.zmin
         self.zmax = mgrid.zmax
         self.n_ext_cur = mgrid.n_ext_cur
+        self.extcur = np.asarray(extcur, dtype=np.float64) if extcur is not None else 1.0 * np.ones(mgrid.n_ext_cur, dtype=np.float64)
 
     @classmethod
     def from_mgrid_file(cls, mgrid_filename, extcur, nfp, full_torus=True):
