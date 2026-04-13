@@ -11,17 +11,24 @@ except ImportError:
 # Import Python modules
 from .mgrid import MGrid
 from .ripple import (
-    AxisFinder,
-    FieldLineTracer,
-    MagneticField,
-    epsilon_eff,
+    compute_initial_gradpsi_nemov,
+    find_axis,
+    get_bfield_matrix,
+    initialize_mgrid_field,
+    plot_fieldline_3d,
+    set_extcur,
+    set_trace_parameters,
+    trace_fieldline,
 )
 
 __version__ = "0.1.0"
 __all__ = [
     "MGrid",
-    "MagneticField",
-    "FieldLineTracer",
-    "AxisFinder",
-    "epsilon_eff",
+    "initialize_mgrid_field",
+    "set_extcur",
+    "get_bfield_matrix",
+    "trace_fieldline",
+    "plot_fieldline_3d",
+    "compute_initial_gradpsi_nemov",
+    "find_axis",
 ]
