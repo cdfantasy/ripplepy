@@ -42,3 +42,7 @@ fortran/pspline/*.mod
 mgrid*
 log_xgrid*
 extcur*
+for*
+log*
+threed*
+parvmec*
