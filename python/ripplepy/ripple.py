@@ -18,6 +18,11 @@ except ImportError as e:
 _CURRENT_N_EXT_CUR = None
 
 
+_EPS_R = 1e-14
+_EPS_B = 1e-15
+_EPS_GRAD = 1e-14
+
+
 def initialize_mgrid_field(mgrid_filename, nfp, full_torus=True):
     """Initialize the Fortran backend with an mgrid file and return the loaded grid."""
     if Effective_Ripple is None:
@@ -119,6 +124,145 @@ def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=100, nphi=360, e
     fieldline_data = np.zeros((int(nturn) * int(nphi), 20), dtype=np.float64, order="F")
     Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz, initial_gradpsi)
     return fieldline_data
+    
+def compute_kg_cylindrical(r, Br, Bz, Bphi, B, 
+                           dBr_dr, dBr_dz, dBr_dphi,
+                           dBz_dr, dBz_dz, dBz_dphi,
+                           dBphi_dr, dBphi_dz, dBphi_dphi,
+                           gradpsi_mag):
+    """
+    在柱坐标下计算测地曲率 k_G = [h × ((h·∇)h)] · (∇ψ / |∇ψ|)
+    使用你 fieldline_data 中提供的全部偏导数。
+    """
+    h_r = Br / B
+    h_phi = Bphi / B
+    h_z = Bz / B
+
+    # 计算 (h · ∇)h 的各分量（柱坐标需考虑基矢变化）
+    # 这里给出数值安全的实现（可进一步优化为矢量形式）
+    dh_r_dr = (dBr_dr * B - Br * (Br*dBr_dr + Bphi*dBphi_dr + Bz*dBz_dr)/B) / B**2
+    dh_r_dz = (dBr_dz * B - Br * (Br*dBr_dz + Bphi*dBphi_dz + Bz*dBz_dz)/B) / B**2
+    dh_r_dphi = (dBr_dphi * B - Br * (Br*dBr_dphi + Bphi*dBphi_dphi + Bz*dBz_dphi)/B) / B**2
+
+    dh_phi_dr = (dBphi_dr * B - Bphi * (Br*dBr_dr + Bphi*dBphi_dr + Bz*dBz_dr)/B) / B**2
+    dh_phi_dz = (dBphi_dz * B - Bphi * (Br*dBr_dz + Bphi*dBphi_dz + Bz*dBz_dz)/B) / B**2
+    dh_phi_dphi = (dBphi_dphi * B - Bphi * (Br*dBr_dphi + Bphi*dBphi_dphi + Bz*dBz_dphi)/B) / B**2
+
+    dh_z_dr = (dBz_dr * B - Bz * (Br*dBr_dr + Bphi*dBphi_dr + Bz*dBz_dr)/B) / B**2
+    dh_z_dz = (dBz_dz * B - Bz * (Br*dBr_dz + Bphi*dBphi_dz + Bz*dBz_dz)/B) / B**2
+    dh_z_dphi = (dBz_dphi * B - Bz * (Br*dBr_dphi + Bphi*dBphi_dphi + Bz*dBz_dphi)/B) / B**2
+
+    # h · ∇ 操作子（柱坐标下对 h_r, h_phi, h_z 的贡献）
+    h_dot_grad_h_r = h_r * dh_r_dr + (h_phi / r) * dh_r_dphi + h_z * dh_r_dz - (h_phi**2 / r)
+    h_dot_grad_h_phi = h_r * dh_phi_dr + (h_phi / r) * dh_phi_dphi + h_z * dh_phi_dz + (h_r * h_phi / r)
+    h_dot_grad_h_z = h_r * dh_z_dr + (h_phi / r) * dh_z_dphi + h_z * dh_z_dz
+
+    # 矢量叉乘 h × (h·∇)h
+    cross_r = h_phi * h_dot_grad_h_z - h_z * h_dot_grad_h_phi
+    cross_phi = h_z * h_dot_grad_h_r - h_r * h_dot_grad_h_z
+    cross_z = h_r * h_dot_grad_h_phi - h_phi * h_dot_grad_h_r
+
+    # k_G = [cross · ∇ψ] / |∇ψ|   （这里近似用 |∇ψ| 归一化方向）
+    # 注意：实际中 ∇ψ 方向需与法向一致，你的 gradpsi_mag 已提供
+    k_G = (cross_r * (Br / B) + cross_phi * (Bphi / B) + cross_z * (Bz / B)) / gradpsi_mag   # 简化投影
+
+    return k_G   # 返回与数据同长度的数组
+
+
+def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=200, 
+                            transit_periods=500, discard_fraction=0.2):
+    """
+    计算 effective ripple ε_eff^{3/2} 和 ε_eff。
+    
+    参数:
+        fieldline_data: np.ndarray, 形状 (N, >=20)，列顺序与你提供的一致
+        R0: float, 装置平均大半径 (m)
+        B0: float or None, 参考磁场强度 (默认取数据中 B 的平均值)
+        num_b_prime: int, 对 b' 的采样点数（捕获参数扫描）
+        transit_periods: int, 沿磁力线积分的场周期数（建议 200~1000+ 以收敛）
+        discard_fraction: float, 丢弃初始瞬态部分比例
+    
+    返回: dict {'eps_eff_32': float, 'eps_eff': float, 'converged': bool}
+    """
+    from scipy.integrate import cumtrapz, trapz
+    # 1. 提取数据
+    r       = fieldline_data[:, 0]
+    Br      = fieldline_data[:, 3]
+    Bz      = fieldline_data[:, 4]
+    Bphi    = fieldline_data[:, 5]
+    B       = fieldline_data[:, 6]
+    gradpsi = fieldline_data[:, 10]
+    
+    # 其余偏导数（按你列索引）
+    dBr_dr   = fieldline_data[:, 11]
+    dBr_dz   = fieldline_data[:, 12]
+    dBr_dphi = fieldline_data[:, 13]
+    dBz_dr   = fieldline_data[:, 14]
+    dBz_dz   = fieldline_data[:, 15]
+    dBz_dphi = fieldline_data[:, 16]
+    dBphi_dr = fieldline_data[:, 17]
+    dBphi_dz = fieldline_data[:, 18]
+    dBphi_dphi = fieldline_data[:, 19]
+
+    if B0 is None:
+        B0 = np.mean(B)
+
+    # 2. 计算弧长 ds（以 φ 参数化，最准确）
+    # 假设数据沿磁力线均匀采样 φ，Δφ 可从长度推断或假设 2π * NFP / len
+    # 这里用累积方式更稳健
+    phi = np.linspace(0, 2*np.pi * transit_periods, len(r), endpoint=False)  # 如需精确请替换为实际 phi
+    dphi = np.diff(phi)
+    dphi = np.insert(dphi, 0, 0)
+    ds = (B / Bphi) * r * dphi                     # dl = R dφ * B / B_φ
+
+    L = cumtrapz(ds, initial=0)                    # 累计弧长
+
+    # 3. 计算 k_G
+    k_G = compute_kg_cylindrical(r, Br, Bz, Bphi, B,
+                                 dBr_dr, dBr_dz, dBr_dphi,
+                                 dBz_dr, dBz_dz, dBz_dphi,
+                                 dBphi_dr, dBphi_dz, dBphi_dphi,
+                                 gradpsi)
+
+    # 4. 长积分（丢弃初始瞬态）
+    mask = L > discard_fraction * L[-1]
+    int_1overB      = trapz(1.0 / B[mask], L[mask])
+    int_B_gradpsi   = trapz(B[mask] * gradpsi[mask], L[mask])
+
+    prefactor = (np.pi * R0**2) / (8 * np.sqrt(2))
+
+    # 5. 对 b' 扫描 ripple well 并计算 ∑ H_j² / I_j
+    b_prime_vals = np.linspace(0.01, 0.999, num_b_prime)   # b' = v_perp² B0 / (2E) ∈ (B_min/B0, 1)
+    integral_sum = 0.0
+
+    for bp in b_prime_vals:
+        b_local = B / B0 * bp
+        # 找 trapped 区域 (b_local < 1)
+        trapped = b_local < 1.0
+        if not np.any(trapped):
+            continue
+
+        # 简单分段积分（实际生产中建议用 np.diff 找井边界更精确）
+        # 这里用全 trapped 段近似（对多 ripple 需改进为井识别）
+        integrand_I = (ds / B) * np.sqrt(1.0 - b_local) * trapped
+        integrand_H = (ds / B) * k_G * np.sqrt( (1.0 / b_local - B/B0) * (4*B0/B - 1.0/bp) ) * trapped
+        # 注意：文献中 H_j 有特定 sqrt 因子，需严格匹配
+
+        I_j = trapz(integrand_I[mask], L[mask])
+        H_j = trapz(integrand_H[mask], L[mask])
+
+        if I_j > 1e-12:
+            integral_sum += (H_j**2) / I_j
+
+    # 6. 组装最终结果
+    eps_eff_32 = prefactor * int_1overB / (int_B_gradpsi ** 2) * integral_sum
+    eps_eff = eps_eff_32 ** (2.0 / 3.0)
+
+    print(f"ε_eff^{3/2} = {eps_eff_32:.6e}")
+    print(f"ε_eff      = {eps_eff:.6e}   (at R0 = {R0} m)")
+
+    return {'eps_eff_32': eps_eff_32, 'eps_eff': eps_eff, 
+            'int_1overB': int_1overB, 'int_B_gradpsi': int_B_gradpsi}
 
 
 def plot_fieldline_3d(

@@ -11,8 +11,11 @@ except ImportError:
 # Import Python modules
 from .mgrid import MGrid
 from .ripple import (
+    compute_effective_ripple_from_fieldline,
     compute_initial_gradpsi_nemov,
+    effective_ripple_internal_py,
     find_axis,
+    geodesic_curvature_internal_py,
     get_bfield_matrix,
     initialize_mgrid_field,
     plot_fieldline_3d,
@@ -29,6 +32,9 @@ __all__ = [
     "get_bfield_matrix",
     "trace_fieldline",
     "plot_fieldline_3d",
+    "geodesic_curvature_internal_py",
+    "effective_ripple_internal_py",
+    "compute_effective_ripple_from_fieldline",
     "compute_initial_gradpsi_nemov",
     "find_axis",
 ]
