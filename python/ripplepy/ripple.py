@@ -169,8 +169,8 @@ def compute_kg_cylindrical(r, Br, Bz, Bphi, B,
     return k_G   # 返回与数据同长度的数组
 
 
-def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=200, 
-                            transit_periods=500, discard_fraction=0.2):
+def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000, 
+                            transit_periods=360):
     """
     计算 effective ripple ε_eff^{3/2} 和 ε_eff。
     
@@ -184,14 +184,14 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=200,
     
     返回: dict {'eps_eff_32': float, 'eps_eff': float, 'converged': bool}
     """
-    from scipy.integrate import cumtrapz, trapz
+    from scipy.integrate import cumulative_trapezoid
     # 1. 提取数据
     r       = fieldline_data[:, 0]
     Br      = fieldline_data[:, 3]
     Bz      = fieldline_data[:, 4]
     Bphi    = fieldline_data[:, 5]
     B       = fieldline_data[:, 6]
-    gradpsi = fieldline_data[:, 10]
+    gradpsi = np.abs(fieldline_data[:, 10])
     
     # 其余偏导数（按你列索引）
     dBr_dr   = fieldline_data[:, 11]
@@ -208,14 +208,16 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=200,
         B0 = np.mean(B)
 
     # 2. 计算弧长 ds（以 φ 参数化，最准确）
-    # 假设数据沿磁力线均匀采样 φ，Δφ 可从长度推断或假设 2π * NFP / len
-    # 这里用累积方式更稳健
-    phi = np.linspace(0, 2*np.pi * transit_periods, len(r), endpoint=False)  # 如需精确请替换为实际 phi
+
+    phi = np.linspace(0, 2*np.pi , transit_periods)  # 如需精确请替换为实际 phi
     dphi = np.diff(phi)
     dphi = np.insert(dphi, 0, 0)
     ds = (B / Bphi) * r * dphi                     # dl = R dφ * B / B_φ
+    bmax = np.max(B)
+    bmin = np.min(B)
 
-    L = cumtrapz(ds, initial=0)                    # 累计弧长
+
+    L = cumulative_trapezoid(ds, initial=0)        # 累计弧长
 
     # 3. 计算 k_G
     k_G = compute_kg_cylindrical(r, Br, Bz, Bphi, B,
@@ -223,40 +225,16 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=200,
                                  dBz_dr, dBz_dz, dBz_dphi,
                                  dBphi_dr, dBphi_dz, dBphi_dphi,
                                  gradpsi)
+    db = (bmax - bmin)/num_b_prime
+    for i in range(num_b_prime):
+        b_prime = bmin + i*db
+        H_sqrt_term = np.sqrt(db - B/B0)
+        I_sqrt_term = np.sqrt(1-B/B0*db)
+        H(i) = 1/db*B*ds*H_sqrt_term*(4*B0/B-1/db)*gradpsi*k_G
+        I(i) = ds/B*I_sqrt_term
+        
 
-    # 4. 长积分（丢弃初始瞬态）
-    mask = L > discard_fraction * L[-1]
-    int_1overB      = trapz(1.0 / B[mask], L[mask])
-    int_B_gradpsi   = trapz(B[mask] * gradpsi[mask], L[mask])
 
-    prefactor = (np.pi * R0**2) / (8 * np.sqrt(2))
-
-    # 5. 对 b' 扫描 ripple well 并计算 ∑ H_j² / I_j
-    b_prime_vals = np.linspace(0.01, 0.999, num_b_prime)   # b' = v_perp² B0 / (2E) ∈ (B_min/B0, 1)
-    integral_sum = 0.0
-
-    for bp in b_prime_vals:
-        b_local = B / B0 * bp
-        # 找 trapped 区域 (b_local < 1)
-        trapped = b_local < 1.0
-        if not np.any(trapped):
-            continue
-
-        # 简单分段积分（实际生产中建议用 np.diff 找井边界更精确）
-        # 这里用全 trapped 段近似（对多 ripple 需改进为井识别）
-        integrand_I = (ds / B) * np.sqrt(1.0 - b_local) * trapped
-        integrand_H = (ds / B) * k_G * np.sqrt( (1.0 / b_local - B/B0) * (4*B0/B - 1.0/bp) ) * trapped
-        # 注意：文献中 H_j 有特定 sqrt 因子，需严格匹配
-
-        I_j = trapz(integrand_I[mask], L[mask])
-        H_j = trapz(integrand_H[mask], L[mask])
-
-        if I_j > 1e-12:
-            integral_sum += (H_j**2) / I_j
-
-    # 6. 组装最终结果
-    eps_eff_32 = prefactor * int_1overB / (int_B_gradpsi ** 2) * integral_sum
-    eps_eff = eps_eff_32 ** (2.0 / 3.0)
 
     print(f"ε_eff^{3/2} = {eps_eff_32:.6e}")
     print(f"ε_eff      = {eps_eff:.6e}   (at R0 = {R0} m)")
