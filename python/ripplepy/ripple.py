@@ -169,8 +169,7 @@ def compute_kg_cylindrical(r, Br, Bz, Bphi, B,
     return k_G   # 返回与数据同长度的数组
 
 
-def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000, 
-                            transit_periods=360):
+def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000):
     """
     计算 effective ripple ε_eff^{3/2} 和 ε_eff。
     
@@ -179,7 +178,6 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000,
         R0: float, 装置平均大半径 (m)
         B0: float or None, 参考磁场强度 (默认取数据中 B 的平均值)
         num_b_prime: int, 对 b' 的采样点数（捕获参数扫描）
-        transit_periods: int, 沿磁力线积分的场周期数（建议 200~1000+ 以收敛）
         discard_fraction: float, 丢弃初始瞬态部分比例
     
     返回: dict {'eps_eff_32': float, 'eps_eff': float, 'converged': bool}
@@ -187,12 +185,13 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000,
     from scipy.integrate import cumulative_trapezoid
     # 1. 提取数据
     r       = fieldline_data[:, 0]
+    phi     = fieldline_data[:, 2]
     Br      = fieldline_data[:, 3]
     Bz      = fieldline_data[:, 4]
     Bphi    = fieldline_data[:, 5]
     B       = fieldline_data[:, 6]
     gradpsi = np.abs(fieldline_data[:, 10])
-    
+    npoints = len(r)
     # 其余偏导数（按你列索引）
     dBr_dr   = fieldline_data[:, 11]
     dBr_dz   = fieldline_data[:, 12]
@@ -203,21 +202,23 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000,
     dBphi_dr = fieldline_data[:, 17]
     dBphi_dz = fieldline_data[:, 18]
     dBphi_dphi = fieldline_data[:, 19]
-
+     
+    
     if B0 is None:
         B0 = np.mean(B)
 
     # 2. 计算弧长 ds（以 φ 参数化，最准确）
 
-    phi = np.linspace(0, 2*np.pi , transit_periods)  # 如需精确请替换为实际 phi
+
     dphi = np.diff(phi)
     dphi = np.insert(dphi, 0, 0)
     ds = (B / Bphi) * r * dphi                     # dl = R dφ * B / B_φ
+    ds_invB = r*dphi/Bphi                               # dl / B 用于后续积分权重
     bmax = np.max(B)
     bmin = np.min(B)
+    b_prime = np.linspace(bmin/B0, bmax/B0, num_b_prime)
 
-
-    L = cumulative_trapezoid(ds, initial=0)        # 累计弧长
+    # L = cumulative_trapezoid(ds, initial=0)        # 累计弧长
 
     # 3. 计算 k_G
     k_G = compute_kg_cylindrical(r, Br, Bz, Bphi, B,
@@ -225,22 +226,29 @@ def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=5000,
                                  dBz_dr, dBz_dz, dBz_dphi,
                                  dBphi_dr, dBphi_dz, dBphi_dphi,
                                  gradpsi)
-    db = (bmax - bmin)/num_b_prime
+    # db = (bmax - bmin)/num_b_prime/B0
+    H_I = np.zeros(num_b_prime)
     for i in range(num_b_prime):
-        b_prime = bmin + i*db
-        H_sqrt_term = np.sqrt(db - B/B0)
-        I_sqrt_term = np.sqrt(1-B/B0*db)
-        H(i) = 1/db*B*ds*H_sqrt_term*(4*B0/B-1/db)*gradpsi*k_G
-        I(i) = ds/B*I_sqrt_term
-        
+        k = 0
+        for j in range(npoints):
+            H_j = np.zeros(npoints)
+            I_j = np.zeros(npoints)
+            if b_prime[i] > B[j]:
+                H_sqrt_term = np.sqrt(b_prime[i] - B[j]/B0)
+                I_sqrt_term = np.sqrt(1-B[j]/B0*b_prime[i])
+                H_j[j] = ds[j]/(b_prime[i]*B[j])*H_sqrt_term*((4*B0/B[j])-(1/b_prime[i]))*gradpsi[j]*k_G[j]
+                I_j[j] = ds[j]/B[j]*I_sqrt_term
+            else:
+                K = +1
 
+        H_I[i] = np.sum(b_prime[i]*H_j**2/I_j)
 
-
-    print(f"ε_eff^{3/2} = {eps_eff_32:.6e}")
-    print(f"ε_eff      = {eps_eff:.6e}   (at R0 = {R0} m)")
-
-    return {'eps_eff_32': eps_eff_32, 'eps_eff': eps_eff, 
-            'int_1overB': int_1overB, 'int_B_gradpsi': int_B_gradpsi}
+    e1 = (np.pi*R0*R0)/(8*np.sqrt(2))*np.sum(ds_invB)
+    e2 = np.sqrt(np.sum(ds_invB*gradpsi))
+    e3 = np.sum(H_I)
+    eps_eff = e1*e2*e3
+    
+    return e1, e2, e3, eps_eff
 
 
 def plot_fieldline_3d(
