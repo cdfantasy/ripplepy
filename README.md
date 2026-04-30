@@ -1,143 +1,133 @@
-# ripplepy
+# Autopilot Prompt: Nemov Eq. (17)/(29)/(30)/(31) Extraction + Code Alignment
 
-## Test Version Notice
+你将收到三类输入：
+1. 原始文献（Nemov et al., 1999, Physics of Plasmas 6, 4622; DOI: 10.1063/1.873749）
+2. 当前代码（重点: [fortran/ripple.f90](fortran/ripple.f90), [python/ripplepy/ripple.py](python/ripplepy/ripple.py), [tests/test.py](tests/test.py)）
+3. 本 README（作为执行规范）
 
-This repository is currently a **test version** intended for method development,
-numerical experimentation, and workflow validation.
-It is **not production-ready** and should not be used as a validated engineering tool
-without independent verification.
+你的任务是：
+- 以文献原文为准，精确提取并核对以下关键公式：Eq. (17), Eq. (29), Eq. (30), Eq. (31)。
+- 将公式与当前实现逐项对齐，修正实现中与文献不一致的部分。
+- 保持 API 尽量稳定，优先修复物理公式、单位、归一化、积分定义与数值稳定性。
 
-## Abstract
+## 1) 公式锚点（先验结构，必须用文献原式二次核对）
 
-ripplepy provides a Python-Fortran workflow for computing effective ripple metrics
-from magnetic-field-line data. The package combines:
+以下写法是基于当前实现与 Nemov 体系的结构化抽取，符号细节以文献原式为最终标准。
 
-- A compiled Fortran backend for field interpolation and field-line tracing
-- A Python post-processing layer for geodesic-curvature and ripple diagnostics
-- Hybrid numerical quadrature tailored to turning-point singular behavior
+### Eq. (17): Geodesic curvature term
 
-The current implementation follows a Nemov-style formulation, including
-the geodesic curvature expression and the nested integrals for effective ripple.
+$$
+\kappa_g = \frac{\nabla\psi}{|\nabla\psi|} \cdot (\mathbf{b} \times \boldsymbol{\kappa}),
+\qquad
+\boldsymbol{\kappa} = (\mathbf{b}\cdot\nabla)\mathbf{b},
+\qquad
+\mathbf{b}=\frac{\mathbf{B}}{|\mathbf{B}|}.
+$$
 
-## Scientific Scope
+在柱坐标中需包含基矢变化项（例如 $\phi$ 向的 $1/R$ 几何项）。
 
-The present code is designed for exploratory studies of non-axisymmetric field effects,
-with emphasis on the computation of an effective ripple proxy from traced trajectories.
+### Eq. (29): Effective ripple assembly
 
-Implemented model pathway:
+当前实现对应的组合结构为：
 
-1. Trace field lines on a precomputed magnetic grid.
-2. Evaluate local geometric quantities and field derivatives.
-3. Compute geodesic curvature term $k_g$.
-4. Assemble well-wise integrals and outer $b'$ integration.
-5. Return an effective ripple quantity scaled by major radius.
+$$
+\epsilon_{\mathrm{eff}}
+=
+\frac{\pi R_0^2}{8\sqrt{2}}
+\left(\int db'\,\sum_j \frac{H_j(b')^2}{I_j(b')}\right)
+\frac{\int \frac{dl}{B}}{\sqrt{\int \frac{dl}{B}|\nabla\psi|}}.
+$$
 
-## Numerical Methodology
+说明：
+- 代码中通常把
+	$\int db'\,\sum_j H_j^2/I_j$ 记为 `e1`，
+	$\int dl/B$ 记为 `e2`，
+	$\int (dl/B)|\nabla\psi|$ 记为 `e3`。
+- 需要严格核对文献中是 $\epsilon_{\mathrm{eff}}$ 还是 $\epsilon_{\mathrm{eff}}^{3/2}$ 形式，以及 $R_0$ 与归一化因子的精确定义。
 
-The integration strategy in the Python post-processing layer uses a hybrid approach:
+### Eq. (30): Intermediate integral H
 
-1. Core smooth intervals: composite Newton-Cotes (Simpson rule).
-2. Near turning points: Gauss-Legendre quadrature.
-3. Endpoint correction: linearized asymptotic analytic compensation.
+对每个 bounce-well $j$：
 
-This design targets improved robustness for integrands containing square-root
-endpoint behavior near trapped-particle turning points.
+$$
+H_j(b')
+=
+\int_{l_{j1}}^{l_{j2}}
+\frac{dl}{b' B}
+\sqrt{b' - B/B_0}
+\left(4B_0/B - 1/b'\right)
+|\nabla\psi|\,\kappa_g.
+$$
 
-## Equation-to-Code Mapping
+### Eq. (31): Intermediate integral I
 
-The current implementation maps literature equations to code-level operations as follows:
+$$
+I_j(b')
+=
+\int_{l_{j1}}^{l_{j2}}
+\frac{dl}{B}
+\sqrt{1 - \frac{B}{B_0 b'}}.
+$$
 
-- Geodesic curvature term: Eq. (17)
-- Effective ripple assembly: Eq. (29)
-- Intermediate integral $H$: Eq. (30)
-- Intermediate integral $I$: Eq. (31)
+然后在每个 $b'$ 上汇总 $\sum_j H_j^2/I_j$，再对 $b'$ 做外层积分。
 
-Core implementation file:
+## 2) 与现有代码的映射（必须逐项核查）
 
-- [python/ripplepy/ripple.py](python/ripplepy/ripple.py)
+### [fortran/ripple.f90](fortran/ripple.f90)
 
-## Software Status
+- Eq. (17) 对应：`geodesic_curvature_internal`
+	- `b = B/|B|`
+	- `kappa = (b·∇)b`
+	- `geocur(i) = ((b×kappa)·gradpsi)/|gradpsi|`
+- Eq. (30)/(31) 对应：`effective_ripple_internal` 中 `h_j` / `i_j` 累加
+- Eq. (29) 对应：`effective_ripple_internal` 末尾 `epsilon_eff` 组装
 
-- Version: 0.1.0
-- API is unstable and may change without deprecation guarantees.
-- Numerical defaults and parameterization are still being tuned.
-- Validation coverage is incomplete.
+必须重点检查：
+1. prefactor 是否应使用 `R0^2`，而不是硬编码常数（当前代码中出现 `1d0**2`）。
+2. `Q` 与物理分量映射是否一致：`Q = R * (∂ψ/∂φ)` 还是 `Q = R^2*(1/R ∂ψ/∂φ)` 的实现一致性。
+3. `ds = R * B/|Bphi| * dphi` 的符号与绝对值处理是否符合文献积分路径定义。
+4. bounce 区间切分条件与端点处理（避免漏积分、重复积分、负根号）。
+5. 是否存在调试代码破坏主流程（例如错误位置的 `e1/e2/e3` 缩放、未初始化变量、早退分支）。
 
-## Requirements
+### [tests/test.py](tests/test.py)
 
-- Python >= 3.8
-- CMake >= 3.18
-- Ninja >= 1.10
-- Meson >= 1.0
-- NumPy >= 1.19
-- SciPy >= 1.5
-- f90wrap >= 0.2
-- A Fortran compiler toolchain
+- 这是当前回归测试与运行入口。
+- 自动修复后必须保证该脚本可运行，并给出 `epsilon_eff` 与 `Bboundary`。
 
-## Installation (Research/Development)
+## 3) 执行约束
 
-From the repository root:
+- 所有编译与运行在 conda 环境 `simsopt_dev` 中完成。
+- 若检测到当前激活环境不是 `simsopt_dev`，先切换再编译/测试。
+- 优先最小改动修复，不做无关重构。
+
+建议命令（可按项目实际 CMake/pyproject 细化）：
 
 ```bash
-pip install -e .
+conda activate simsopt_dev
+python -m pip install -e .
+python tests/test.py
 ```
 
-If the extension build is missing, import will fail by design to prevent
-silent fallback to incomplete functionality.
+## 4) 交付要求
 
-## Minimal Reproducible Workflow
+输出必须包括：
+1. 文献 Eq. (17)/(29)/(30)/(31) 的最终文本（可用 LaTeX）与变量定义。
+2. 每个公式在代码中的实现位置与差异说明（文件 + 函数 + 关键行逻辑）。
+3. 已修改内容清单（按文件列出）。
+4. `tests/test.py` 的运行结果摘要（关键数值 + 是否通过）。
+5. 仍存在的不确定项（若文献符号歧义，明确指出并给出候选实现）。
 
-```python
-from ripplepy import MagneticField, FieldLineTracer, epsilon_eff
+## 5) 失败优先级与调试顺序
 
-field = MagneticField.from_mgrid_file(
-	mgrid_filename="path/to/mgrid.nc",
-	extcur=[1.0],
-	nfp=3,
-	full_torus=True,
-)
+若结果异常（如 `epsilon_eff=0`、`NaN`、数量级失真），按如下顺序排查：
+1. `geocur` 分布是否几乎全零（先查 Eq. 17 实现）。
+2. `H_j`/`I_j` 是否大量被阈值裁掉（先查 Eq. 30/31 的根号与分段条件）。
+3. `e2/e3` 是否因 `Bphi` 或 `|gradpsi|` 处理导致偏小/偏零。
+4. prefactor 与归一化（`R0`, `B0`, `b'` 范围）是否与文献一致。
 
-tracer = FieldLineTracer(field, nturn=2, nphi=360)
-processor = epsilon_eff(field, nturn=2, nphi=360)
+## 6) 重要说明
 
-epsilon_value, bboundary, fieldline_data, geocur = processor.compute_ripple_python(
-	initial_rz=[1.0, 0.0],
-	n_b=1200,
-)
+- 本 README 给出的是“实现骨架 + 核对清单”。
+- 公式最终形式必须以你收到的原始文献页面为准，并在输出中说明“与本文档先验结构相比”的差异。
 
-print("epsilon_eff =", epsilon_value)
-```
-
-## Repository Structure
-
-- [python/ripplepy](python/ripplepy): Python API and post-processing implementation
-- [fortran](fortran): Fortran backend sources
-- [tests](tests): notebooks and sample test inputs
-- [examples](examples): auxiliary example resources
-
-## Reproducibility Notes
-
-For reproducible numerical comparisons, record at minimum:
-
-- Grid source and resolution
-- External current vector
-- Trace parameters ($nturn$, $nphi$)
-- Integration controls ($n_b$, Gauss order, Newton-Cotes points, endpoint fraction)
-- Python/NumPy/SciPy/compiler versions
-
-## Validation and Limitations
-
-- This implementation is under active development and should be treated as provisional.
-- Numerical agreement may depend on resolution and turning-point handling settings.
-- Independent cross-checking against trusted reference workflows is recommended.
-
-## Citation
-
-If you use this repository for research prototypes, please cite:
-
-1. The relevant effective-ripple literature you follow for the equations.
-2. This repository (commit hash and access date) as software used in analysis.
-
-## License
-
-See project metadata for licensing details.
+ 

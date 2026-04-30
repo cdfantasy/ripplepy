@@ -11,6 +11,7 @@ except ImportError:
 # Import Python modules
 from .mgrid import MGrid
 from .ripple import (
+    compute_epstot,
     compute_initial_gradpsi_nemov,
     find_axis,
     get_bfield_matrix,
@@ -19,13 +20,14 @@ from .ripple import (
     set_extcur,
     set_trace_parameters,
     trace_fieldline,
-    compute_kg_cylindrical,
-    compute_effective_ripple
+    # compute_kg_cylindrical,
+    # compute_effective_ripple
 )
 
 __version__ = "0.1.0"
 __all__ = [
     "MGrid",
+    "compute_epstot",
     "initialize_mgrid_field",
     "set_extcur",
     "get_bfield_matrix",
@@ -34,6 +36,6 @@ __all__ = [
     "compute_initial_gradpsi_nemov",
     "find_axis",
     "set_trace_parameters",
-    "compute_kg_cylindrical",
-    "compute_effective_ripple"
+    # "compute_kg_cylindrical",
+    # "compute_effective_ripple"
 ]
