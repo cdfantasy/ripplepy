@@ -1,18 +1,5 @@
 # Autopilot Prompt: Nemov Eq. (17)/(29)/(30)/(31) Extraction + Code Alignment
 
-你将收到三类输入：
-1. 原始文献（Nemov et al., 1999, Physics of Plasmas 6, 4622; DOI: 10.1063/1.873749）
-2. 当前代码（重点: [fortran/ripple.f90](fortran/ripple.f90), [python/ripplepy/ripple.py](python/ripplepy/ripple.py), [tests/test.py](tests/test.py)）
-3. 本 README（作为执行规范）
-
-你的任务是：
-- 以文献原文为准，精确提取并核对以下关键公式：Eq. (17), Eq. (29), Eq. (30), Eq. (31)。
-- 将公式与当前实现逐项对齐，修正实现中与文献不一致的部分。
-- 保持 API 尽量稳定，优先修复物理公式、单位、归一化、积分定义与数值稳定性。
-
-## 1) 公式锚点（先验结构，必须用文献原式二次核对）
-
-以下写法是基于当前实现与 Nemov 体系的结构化抽取，符号细节以文献原式为最终标准。
 
 ### Eq. (17): Geodesic curvature term
 
