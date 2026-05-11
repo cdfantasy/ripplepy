@@ -20,6 +20,7 @@ from .ripple import (
     set_extcur,
     set_trace_parameters,
     trace_fieldline,
+    calculate_plasma_params,
     # compute_kg_cylindrical,
     # compute_effective_ripple
 )
@@ -36,6 +37,7 @@ __all__ = [
     "compute_initial_gradpsi_nemov",
     "find_axis",
     "set_trace_parameters",
+    "calculate_plasma_params",
     # "compute_kg_cylindrical",
     # "compute_effective_ripple"
 ]

@@ -90,12 +90,13 @@ def get_bfield_matrix(extcur, r, z, phi):
         )
     return results
 
-def set_trace_parameters(nturn, nphi):
+def set_trace_parameters(nturn, nphi,verbose=True):
     """Set the tracing parameters in the Fortran backend."""
     if Effective_Ripple is None:
         raise ImportError("Effective_Ripple was not imported successfully.")
     Effective_Ripple.set_trace_parameters(int(nturn), int(nphi))
-    print(f"✓ Trace parameters set: nturn={nturn}, nphi={nphi}")
+    if verbose:
+        print(f"✓ Trace parameters set: nturn={nturn}, nphi={nphi}")
 
 def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, extcur=None):
     """Trace a field line directly, without object wrappers."""
@@ -116,13 +117,13 @@ def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, e
     if extcur is not None:
         set_extcur(extcur)
     
-    set_trace_parameters(nturn, nphi)
+    set_trace_parameters(nturn, nphi, verbose=False)
 
     fieldline_data = np.zeros((int(nturn) * int(nphi), 20), dtype=np.float64, order="F")
     Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz, initial_gradpsi)
     return fieldline_data
 
-def compute_epstot(extcur, initial_rz, initial_gradpsi=None,
+def compute_epstot(R0, extcur, initial_rz, initial_gradpsi=None,
                    fieldline_data=None, return_fieldline=False):
     """
     Compute total effective ripple (epsilon_eff) and boundary B field.
@@ -132,6 +133,8 @@ def compute_epstot(extcur, initial_rz, initial_gradpsi=None,
     
     Parameters
     ----------
+    R0 : float
+        Major radius.
     # extcur : array_like, shape (n_ext_cur,)
     #     External coil currents.
     initial_rz : array_like, shape (2,)
@@ -210,7 +213,7 @@ def compute_epstot(extcur, initial_rz, initial_gradpsi=None,
         initial_gradpsi_array,
         fieldline_data
     )
-    
+    epsilon_eff = epsilon_eff*R0**2  
     print(f"✓ Effective ripple computed: ε_eff={epsilon_eff:.6e}, B_boundary={bboundary:.6f} T")
     
     if return_fieldline:
@@ -218,6 +221,78 @@ def compute_epstot(extcur, initial_rz, initial_gradpsi=None,
     else:
         return epsilon_eff, bboundary
 
+def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm):
+    """
+    针对 R, Z, Phi 数据的体积及 Iota 计算
+    :param fieldline_data: (nphi*nturn, 3) -> [R, Z, Phi]
+    :param axis_data: (nphi+1, 3) -> [R, Z, Phi] 磁轴轨迹
+    :param nturn: 极向采样点数
+    :param nphi: 环向采样点数
+    :param Rm: 大半径
+    :param nfp: 场周期数
+    :return: (volume, a_minor, iota)
+    """
+    
+    # 1. 数据重塑 (按照 R, Z, Phi 分离)
+    # 假设 fieldline_data 是按 [nturn, nphi] 排列的场线点
+    R = fieldline_data[:, 0].reshape((nturn, nphi)).T # (nphi, nturn)
+    Z = fieldline_data[:, 1].reshape((nturn, nphi)).T # (nphi, nturn)
+    Phi = fieldline_data[:, 2].reshape((nturn, nphi)).T # (nphi, nturn)
+
+    # 2. 获取磁轴参考点
+    # 取对应环向位置的磁轴坐标。假设 axis_data 长度与 nphi 匹配
+    # 如果 axis_data 是 (nphi+1, 3)，取前 nphi 个点
+    R_axis = axis_data[:nphi, 0].reshape(-1, 1) # 变成列向量以便广播
+    Z_axis = axis_data[:nphi, 1].reshape(-1, 1)
+
+    # 3. 极向排序与体积计算
+    # 计算极向角进行排序
+    thetas = np.arctan2(Z - Z_axis, R - R_axis)
+    
+    # 预准备排序后的数组
+    R_sorted = np.zeros_like(R)
+    Z_sorted = np.zeros_like(Z)
+    
+    for i in range(nphi):
+        idx = np.argsort(thetas[i, :])
+        R_sorted[i, :] = R[i, idx]
+        Z_sorted[i, :] = Z[i, idx]
+
+    # 利用滚位计算截面积分 (Green公式)
+    R_next = np.roll(R_sorted, -1, axis=1)
+    Z_next = np.roll(Z_sorted, -1, axis=1)
+    # 体积元累加
+    vol_sum = np.sum((R_next - R_sorted) * (R_next + R_sorted) * (Z_next + Z_sorted))
+    volume = abs(vol_sum) * (np.pi / nphi)
+    
+    # 有效小半径
+    am = np.sqrt(volume / (2 * np.pi**2 * Rm))
+
+    # 4. 计算 Iota (Rotational Transform)
+    # 注意：计算 iota 通常需要追踪场线在极向角上的连续变化
+    # 我们计算第一条场线（或平均）在环向一周内的极向角跨度
+    
+    # 取第一条追踪场线的坐标轨迹 (假设 fieldline_data 的排列允许提取连续轨迹)
+    # 如果 data 是由平衡代码生成的磁面点，iota 通常是输入参数或通过磁通量导出的。
+    # 这里提供一种基于坐标演化的几何估计方法：
+    
+    # 计算相对于磁轴的极向角演化（不排序，使用原始轨迹顺序）
+    # 假设 R[0, :] 是一条场线在不同环向角下的 R 坐标
+    # 但根据你的 nphi/nturn 结构，通常 R[:, 0] 是固定极向位置在环向的分布
+    
+    # 几何法估算：iota \approx d_theta / d_phi
+    # 提取一条连续场线轨迹（这里假设 fieldline_data 的原始顺序即场线追踪顺序）
+    # 如果数据只是磁面上的点阵而非轨迹，请注意该 iota 仅为几何近似
+    d_theta = np.unwrap(thetas[:, 0]) # 展开相位，避免 +-pi 跳变
+    d_phi = np.unwrap(Phi[:, 0])     # 环向角展开
+    
+    # 拟合斜率即为 iota
+    if len(d_phi) > 1:
+        iota = (d_theta[-1] - d_theta[0]) / (d_phi[-1] - d_phi[0])
+    else:
+        iota = 0.0
+
+    return volume, am, abs(iota)
 
 # def compute_kg_cylindrical(r, Br, Bz, Bphi, B, 
 #                            dBr_dr, dBr_dz, dBr_dphi,
@@ -344,8 +419,7 @@ def compute_epstot(extcur, initial_rz, initial_gradpsi=None,
     
 #     return e1, e2, e3, eps_eff
 
-import numpy as np
-from scipy.integrate import cumulative_trapezoid, trapezoid
+
 
 # def compute_effective_ripple(fieldline_data, R0, B0=None, num_b_prime=3000):
 #     """
