@@ -24,6 +24,13 @@ from .ripple import (
     # compute_kg_cylindrical,
     # compute_effective_ripple
 )
+from .optimize import (
+    ObjectiveFunction,
+    OptimizationConfig,
+    differential_evolution,
+    mutate_de,
+    crossover_de,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -38,6 +45,11 @@ __all__ = [
     "find_axis",
     "set_trace_parameters",
     "calculate_plasma_params",
+    "ObjectiveFunction",
+    "OptimizationConfig",
+    "differential_evolution",
+    "mutate_de",
+    "crossover_de",
     # "compute_kg_cylindrical",
     # "compute_effective_ripple"
 ]

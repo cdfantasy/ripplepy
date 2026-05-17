@@ -60,7 +60,7 @@ def set_extcur(extcur):
         if _CURRENT_N_EXT_CUR is None:
             raise ValueError("Field not initialized. Call initialize_mgrid_field(...) before set_extcur(None).")
         extcur = np.ones(_CURRENT_N_EXT_CUR, dtype=np.float64)
-        print(f"✓ No extcur provided; using raw")
+        print(f"✓ No extcur provided; using raw.")
     else:
         print(f"✓ Setting extcur: {extcur}")
     extcur_array = np.asarray(extcur, dtype=np.float64)
@@ -98,6 +98,36 @@ def set_trace_parameters(nturn, nphi,verbose=True):
     if verbose:
         print(f"✓ Trace parameters set: nturn={nturn}, nphi={nphi}")
 
+
+def _decode_trace_error(error_flag):
+    error_flag = int(error_flag)
+    if error_flag == 0:
+        return None
+    if error_flag <= -1000:
+        ier = abs(error_flag) - 1000
+        return f"interpolate_field failed (ier={ier})"
+    if error_flag == -101:
+        return "trace parameters were not set"
+    if error_flag == -100:
+        return "field was not initialized"
+    return f"fieldline ODE failed (ISTATE={error_flag})"
+
+
+def _extract_optional_error_flag(result):
+    if result is None:
+        return 0
+    if not isinstance(result, tuple):
+        if np.isscalar(result):
+            return int(result)
+        return 0
+    if len(result) == 0:
+        return 0
+    if len(result) == 1 and np.isscalar(result[0]):
+        return int(result[0])
+    if len(result) >= 2 and np.isscalar(result[-1]):
+        return int(result[-1])
+    return 0
+
 def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, extcur=None):
     """Trace a field line directly, without object wrappers."""
     if Effective_Ripple is None:
@@ -120,7 +150,10 @@ def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, e
     set_trace_parameters(nturn, nphi, verbose=False)
 
     fieldline_data = np.zeros((int(nturn) * int(nphi), 20), dtype=np.float64, order="F")
-    Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz, initial_gradpsi)
+    result = Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz, initial_gradpsi)
+    error_flag = _extract_optional_error_flag(result)
+    if error_flag != 0:
+        raise RuntimeError(f"trace_fieldline failed: {_decode_trace_error(error_flag)}")
     return fieldline_data
 
 def compute_epstot(R0, extcur, initial_rz, initial_gradpsi=None,
@@ -207,12 +240,33 @@ def compute_epstot(R0, extcur, initial_rz, initial_gradpsi=None,
             fieldline_data = np.asfortranarray(fieldline_data)
     
     # Call the Fortran compute_ripple
-    epsilon_eff, bboundary = Effective_Ripple.compute_ripple(
+    result = Effective_Ripple.compute_ripple(
         extcur_array, 
         initial_rz_array, 
         initial_gradpsi_array,
         fieldline_data
     )
+    if isinstance(result, tuple):
+        if len(result) >= 3 and np.isscalar(result[-1]):
+            epsilon_eff, bboundary = result[0], result[1]
+            error_flag = int(result[-1])
+        elif len(result) == 2:
+            epsilon_eff, bboundary = result
+            error_flag = 0
+        elif len(result) == 1 and np.isscalar(result[0]):
+            epsilon_eff = 0.0
+            bboundary = 0.0
+            error_flag = int(result[0])
+        else:
+            epsilon_eff, bboundary = result[0], result[1]
+            error_flag = 0
+    else:
+        epsilon_eff, bboundary = result, 0.0
+        error_flag = 0
+
+    if error_flag != 0:
+        raise RuntimeError(f"compute_epstot failed: {_decode_trace_error(error_flag)}")
+
     epsilon_eff = epsilon_eff*R0**2  
     print(f"✓ Effective ripple computed: ε_eff={epsilon_eff:.6e}, B_boundary={bboundary:.6f} T")
     
@@ -672,7 +726,7 @@ def compute_initial_gradpsi_nemov(extcur, R0, Z0, phi0=0.0, verbose=True):
     return np.array([P0, G0, Q0], dtype=np.float64)
 
 
-def find_axis(initial_rz, timeout=10.0, xtol=1e-10, max_iter=200):
+def find_axis(initial_rz, timeout=2.0, xtol=1e-10, max_iter=200,verbose=False):
     """
     包装 find_axis 函数,设置超时限制
     
@@ -681,7 +735,7 @@ def find_axis(initial_rz, timeout=10.0, xtol=1e-10, max_iter=200):
     initial_rz : tuple
         初始 (R, Z) 猜测值
     timeout : float, optional
-        超时时间(秒),默认 10.0
+        超时时间(秒),默认 2.0
     xtol : float, optional
         收敛容差
     max_iter : int, optional
@@ -696,10 +750,10 @@ def find_axis(initial_rz, timeout=10.0, xtol=1e-10, max_iter=200):
     
     def _find_axis_worker():
         from scipy.optimize import root
-        
-        print(f"\nSearching for magnetic axis...")
-        print(f"  Initial guess: R={initial_rz[0]:.6f}, Z={initial_rz[1]:.6f}")
-        print(f"  Timeout: {timeout:.1f} s")
+        if verbose:
+            print(f"\nSearching for magnetic axis...")
+            print(f"  Initial guess: R={initial_rz[0]:.6f}, Z={initial_rz[1]:.6f}")
+            print(f"  Timeout: {timeout:.1f} s")
 
         # Effective_Ripple.set_trace_parameters(2, 360)
         # initial_gradpsi = [0,0,0]
@@ -742,12 +796,12 @@ def find_axis(initial_rz, timeout=10.0, xtol=1e-10, max_iter=200):
             raise RuntimeError("No valid fieldline data")
         
         distance = np.linalg.norm(result.fun)
-        
-        print("  Optimization completed:")
-        print(f"    Axis position: R={result.x[0]:.10f}, Z={result.x[1]:.10f}")
-        print(f"    Major radius R0: {R0:.10f}")
-        print(f"    Distance error: {distance:.2e}")
-        print(f"    Converged: {result.success}")
+        if verbose:
+            print("  Optimization completed:")
+            print(f"    Axis position: R={result.x[0]:.10f}, Z={result.x[1]:.10f}")
+            print(f"    Major radius R0: {R0:.10f}")
+            print(f"    Distance error: {distance:.2e}")
+            print(f"    Converged: {result.success}")
         
         return result.x, R0, final_fieldline_data, False
 

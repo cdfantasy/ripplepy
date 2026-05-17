@@ -1,7 +1,6 @@
 目标
 
-基于现有 notebook (`tests/ripplepy.ipynb`) 的做法，在 `ripple` 中添加基于差分进化（DE）的优化模块，用于最小化标量量 `epsilon_eff`，控制变量为 `extcur`。
-
+参考test.py中的思路，在 `ripple` 中添加基于差分进化（DE）的优化模块，用于最小化标量量 `epsilon_eff`，控制变量为 `extcur`。注意计算的方法是epsilon_eff和其他相关物理量的计算示例在ipynb中已经有了现成的实例
 总体要求（精简版）
 
 - 在评估任意 `extcur` 时，必须先执行 `find_axis`；磁轴存在性与返回的主半径 `R0` 对后续 `epsilon_eff` 计算是必要的。若找不到磁轴或超时，应明确返回失败状态并对该个体给出惩罚性目标值（例如一个很大的数），同时记录失败原因。

@@ -40,6 +40,7 @@ module effective_ripple
     real(8), allocatable :: fieldline_gradpsi_data_current(:,:)
     real(8) :: Bboundary_current
     real(8) :: epsilon_eff_current
+    integer :: trace_error_code
 
 contains
 
@@ -171,7 +172,7 @@ contains
     !         Bboundary - boundary magnetic field strength
     !============================================================================
     subroutine compute_ripple(extcur, initial_rz, initial_gradpsi, &
-                         epsilon_eff, Bboundary, fieldline_data)
+                         epsilon_eff, Bboundary, fieldline_data, error_flag)
       implicit none
       
       real(8), intent(in) :: extcur(:)
@@ -180,14 +181,19 @@ contains
       real(8), intent(out) :: epsilon_eff
       real(8), intent(out) :: Bboundary
       real(8), intent(out), optional :: fieldline_data(:, :)
+      integer, intent(out), optional :: error_flag
       
       real(8), allocatable :: fieldline_local(:,:)
       real(8), allocatable :: geocur(:)
+      integer :: trace_istate
+
+      if (present(error_flag)) error_flag = 0
       
       if (.not. allocated(fherm_br_arr)) then
         write(*,'(A)') 'Error: Field not initialized. Call initialize_field first.'
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
+        if (present(error_flag)) error_flag = -100
         return
       endif
       
@@ -195,6 +201,7 @@ contains
         write(*,'(A)') 'Error: Trace parameters not set. Call set_trace_parameters first.'
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
+        if (present(error_flag)) error_flag = -101
         return
       endif
 
@@ -207,7 +214,15 @@ contains
       call sum_bfield_internal(extcur)
       
       allocate(fieldline_local(npoints, 20))
-      call trace_gradpsi_internal(fieldline_local, initial_rz, initial_gradpsi)
+      call trace_gradpsi_internal(fieldline_local, initial_rz, initial_gradpsi, trace_istate)
+
+      if (trace_istate /= 0) then
+        epsilon_eff = 0.0d0
+        Bboundary = 0.0d0
+        if (present(error_flag)) error_flag = trace_istate
+        deallocate(fieldline_local)
+        return
+      endif
       
       allocate(geocur(npoints))
       call geodesic_curvature_internal(fieldline_local, geocur, Bboundary)
@@ -267,7 +282,7 @@ contains
     subroutine interpolate_field(r, z, phi, br_interp, bz_interp, bp_interp, &
                                  br_r, br_z, br_phi, &
                                  bz_r, bz_z, bz_phi, &
-                                 bp_r, bp_z, bp_phi)
+                                 bp_r, bp_z, bp_phi, error_flag)
       implicit none
       integer, parameter :: R8=SELECTED_REAL_KIND(12,100)
       real(8), intent(in) :: r, z, phi
@@ -275,25 +290,49 @@ contains
       real(8), intent(out) :: br_r, br_z, br_phi
       real(8), intent(out) :: bz_r, bz_z, bz_phi
       real(8), intent(out) :: bp_r, bp_z, bp_phi
+      integer, intent(out), optional :: error_flag
       integer :: ict(8), ier
       real(8) :: fval(8)
+
+      if (present(error_flag)) error_flag = 0
 
       ict(1:8) = 0
       ict(1) = 1; ict(2) = 1; ict(3) = 1; ict(4) = 1
 
       call r8herm3ev(r, z, phi, r_grid, nr, z_grid, nz, phi_grid, nphi, &
                      ilinx, iliny, ilinz, fherm_br_sum, nr, nz, ict, fval, ier)
-      if (ier /= 0) write(*,'(A,I0)') 'Warning: Interpolation error for Br: ier = ', ier
+      if (ier /= 0) then
+        write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
+        'Error in R: ', r, ', Z: ', z, ', Phi: ', phi, &
+        ' for Br interpolation: ier = ', ier
+        trace_error_code = -1000 - abs(ier)
+        if (present(error_flag)) error_flag = trace_error_code
+        return
+      endif
       br_interp = fval(1); br_r = fval(2); br_z = fval(3); br_phi = fval(4)
 
       call r8herm3ev(r, z, phi, r_grid, nr, z_grid, nz, phi_grid, nphi, &
                      ilinx, iliny, ilinz, fherm_bz_sum, nr, nz, ict, fval, ier)
-      if (ier /= 0) write(*,'(A,I0)') 'Warning: Interpolation error for Bz: ier = ', ier
+      if (ier /= 0) then
+        write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
+        'Error in R: ', r, ', Z: ', z, ', Phi: ', phi, &
+        ' for Bz interpolation: ier = ', ier
+        trace_error_code = -1000 - abs(ier)
+        if (present(error_flag)) error_flag = trace_error_code
+        return
+      endif
       bz_interp = fval(1); bz_r = fval(2); bz_z = fval(3); bz_phi = fval(4)
 
       call r8herm3ev(r, z, phi, r_grid, nr, z_grid, nz, phi_grid, nphi, &
                      ilinx, iliny, ilinz, fherm_bp_sum, nr, nz, ict, fval, ier)
-      if (ier /= 0) write(*,'(A,I0)') 'Warning: Interpolation error for Bp: ier = ', ier
+      if (ier /= 0) then
+        write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
+        'Error in R: ', r, ', Z: ', z, ', Phi: ', phi, &
+        ' for Bp interpolation: ier = ', ier
+        trace_error_code = -1000 - abs(ier)
+        if (present(error_flag)) error_flag = trace_error_code
+        return
+      endif
       bp_interp = fval(1); bp_r = fval(2); bp_z = fval(3); bp_phi = fval(4)
     end subroutine interpolate_field
 
@@ -301,19 +340,30 @@ contains
     ! Internal subroutine: trace_gradpsi_internal
     ! Trace field lines and compute grad_psi evolution
     !============================================================================
-    subroutine trace_gradpsi_internal(fieldline_gradpsi_data, initial_rz, initial_gradpsi)
+    subroutine trace_gradpsi_internal(fieldline_gradpsi_data, initial_rz, initial_gradpsi, error_flag)
       implicit none
       real(8), intent(out) :: fieldline_gradpsi_data(:, :)
       real(8), intent(in)  :: initial_rz(2)
       real(8), intent(in)  :: initial_gradpsi(3)
+      integer, intent(out), optional :: error_flag
 
       integer :: i
       integer :: neq, itol, itask, iopt, lrw, liw, mf
       integer :: istate_local
+      integer :: interp_istate
       real(8) :: rtol, atol, phi, phi_stop
       real(8), allocatable :: v(:), rwork(:)
       integer, allocatable :: iwork(:)
       real(8) :: phi_for_interp
+
+      if (present(error_flag)) error_flag = 0
+
+      trace_error_code = 0
+
+      if (npoints <= 0) then
+        if (present(error_flag)) error_flag = -101
+        return
+      end if
 
       neq = 5
       mf = 10
@@ -356,7 +406,12 @@ contains
                               fieldline_gradpsi_data(i, 17), &
                               fieldline_gradpsi_data(i, 18), &
                               fieldline_gradpsi_data(i, 19), &
-                              fieldline_gradpsi_data(i, 20))
+                              fieldline_gradpsi_data(i, 20), interp_istate)
+
+        if (interp_istate /= 0) then
+          if (present(error_flag)) error_flag = interp_istate
+          exit
+        end if
 
         fieldline_gradpsi_data(i, 7) = sqrt(fieldline_gradpsi_data(i, 4)**2 &
                                           + fieldline_gradpsi_data(i, 5)**2 &
@@ -382,7 +437,13 @@ contains
 
         phi = phi_stop
 
+        if (trace_error_code /= 0) then
+          if (present(error_flag)) error_flag = trace_error_code
+          exit
+        end if
+
         if (istate_local < 0) then
+          if (present(error_flag)) error_flag = istate_local
           write(*, '(A, I0)') 'Warning: LSODE solver returned ISTATE = ', istate_local
           exit
         end if
@@ -430,6 +491,12 @@ contains
       G = v(4)
       Q = v(5)
       !P=∂ψ/∂R, G=∂ψ/∂Z, Q=(∂ψ/∂φ)
+
+      if (trace_error_code /= 0) then
+        vdot(1:neq) = 0.0d0
+        return
+      end if
+
       phi_normalized = phi
       call normalize_phi(phi_normalized)
 
@@ -438,6 +505,11 @@ contains
                             br_r, br_z, br_phi, &
                             bz_r, bz_z, bz_phi, &
                             bp_r, bp_z, bp_phi)
+
+      if (trace_error_code /= 0) then
+        vdot(1:neq) = 0.0d0
+        return
+      end if
 
       zero_threshold = 1.0d-15
       if (abs(bp) < zero_threshold) then
