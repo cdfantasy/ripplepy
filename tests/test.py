@@ -1,3 +1,5 @@
+# Test importing the MGrid module
+# %reset -f
 import numpy as np
 from ripplepy import MGrid
 
@@ -24,7 +26,7 @@ mgrid_filename = str(mgrid_path)
 # extcur = [6.52271941985300E+05, 6.51868569367400E+05, 5.37743588647300E+05, 2.50000000000000E-07, 2.50000000000000E-07, 2.80949750000000E+04, -5.48049500000000E+04, 3.01228950000000E+04, 9.42409100000000E+04, 4.55138737653200E+04]
 # extcur = [1.0]*10
 extcur = None
-initial_rz = (1.56,0)
+
 
 # mgrid_filename = '/home/zkg/CN_H1_scan_fieldlines/H1_design/coils/mgrid_h1_design.nc'
 # extcur = [50000, 5000, 1, -80000, -40000]
@@ -35,15 +37,7 @@ extcur=set_extcur(extcur)
 
 nturn = 200
 nphi = 360
-
+initial_rz = (1.8,0)
 initial_rz = np.array(initial_rz, dtype=np.float64, order='F')
 axis_rz, R0, axis_fieldline, trace_error_flag = find_axis(initial_rz, timeout=10.0, xtol=1e-5, max_iter=100)
 print(f"✓ Magnetic axis found at R={axis_rz[0]:.10f}, Z={axis_rz[1]:.10f}, R0={R0:.10f}")
-
-initial_gradpsi = [1,0,0]
-initial_gradpsi = np.array(initial_gradpsi, dtype=np.float64, order='F')
-set_trace_parameters(nturn, nphi, verbose=True)
-fieldline_data = np.zeros((nturn*nphi, 20), dtype=np.float64, order='F')
-epsilon_eff, bboundary ,fieldline_data= compute_epstot(R0, extcur, initial_rz, initial_gradpsi, fieldline_data, return_fieldline=True)
-vol,Am,iota = calculate_plasma_params(fieldline_data, axis_fieldline, nturn, nphi, R0)
-print(f"✓ Plasma parameters calculated: Volume={vol:.3f}, Major radius={Am:.3f}, iota={iota:.3f}")

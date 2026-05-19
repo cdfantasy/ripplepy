@@ -18,7 +18,35 @@ except ImportError as e:
 _CURRENT_N_EXT_CUR = None
 
 
+def set_trace_verbose(flag, verbose=True):
+    """Set or clear Fortran module verbose writes.
 
+    Parameters
+    ----------
+    flag : bool or int
+        If truthy, enable Fortran writes; if falsy, disable them.
+    verbose : bool, optional
+        If True (default) print a confirmation message.
+    """
+    if Effective_Ripple is None:
+        raise ImportError("Effective_Ripple was not imported successfully.")
+
+    val = 1 if bool(flag) else 0
+    Effective_Ripple.set_trace_verbose(int(val))
+    if verbose:
+        # Query back to ensure the wrapper applied the value
+        try:
+            cur = int(Effective_Ripple.get_trace_verbose())
+        except Exception:
+            cur = val
+        print(f"✓ trace_verbose set to {cur}")
+
+
+def get_trace_verbose():
+    """Return current value of Fortran module `trace_verbose` (0 or 1)."""
+    if Effective_Ripple is None:
+        raise ImportError("Effective_Ripple was not imported successfully.")
+    return int(Effective_Ripple.get_trace_verbose())
 
 def initialize_mgrid_field(mgrid_filename, nfp, full_torus=True):
     """Initialize the Fortran backend with an mgrid file and return the loaded grid."""
@@ -99,36 +127,7 @@ def set_trace_parameters(nturn, nphi,verbose=True):
         print(f"✓ Trace parameters set: nturn={nturn}, nphi={nphi}")
 
 
-def _decode_trace_error(error_flag):
-    error_flag = int(error_flag)
-    if error_flag == 0:
-        return None
-    if error_flag <= -1000:
-        ier = abs(error_flag) - 1000
-        return f"interpolate_field failed (ier={ier})"
-    if error_flag == -101:
-        return "trace parameters were not set"
-    if error_flag == -100:
-        return "field was not initialized"
-    return f"fieldline ODE failed (ISTATE={error_flag})"
-
-
-def _extract_optional_error_flag(result):
-    if result is None:
-        return 0
-    if not isinstance(result, tuple):
-        if np.isscalar(result):
-            return int(result)
-        return 0
-    if len(result) == 0:
-        return 0
-    if len(result) == 1 and np.isscalar(result[0]):
-        return int(result[0])
-    if len(result) >= 2 and np.isscalar(result[-1]):
-        return int(result[-1])
-    return 0
-
-def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, extcur=None):
+def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, extcur=None, verbose=False):
     """Trace a field line directly, without object wrappers."""
     if Effective_Ripple is None:
         raise ImportError("Effective_Ripple was not imported successfully.")
@@ -147,14 +146,22 @@ def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, e
     if extcur is not None:
         set_extcur(extcur)
     
+    # configure Fortran backend and allocate Fortran-contiguous buffers
     set_trace_parameters(nturn, nphi, verbose=False)
+    npoints = int(nturn) * int(nphi)
+    fieldline_data = np.zeros((npoints, 20), dtype=np.float64, order="F")
 
-    fieldline_data = np.zeros((int(nturn) * int(nphi), 20), dtype=np.float64, order="F")
-    result = Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz, initial_gradpsi)
-    error_flag = _extract_optional_error_flag(result)
-    if error_flag != 0:
-        raise RuntimeError(f"trace_fieldline failed: {_decode_trace_error(error_flag)}")
-    return fieldline_data
+    # Ensure small input arrays are Fortran-contiguous as well
+    initial_rz_f = np.asfortranarray(np.asarray(initial_rz, dtype=np.float64))
+    initial_gradpsi_f = np.asfortranarray(np.asarray(initial_gradpsi, dtype=np.float64))
+
+    # Call the Fortran wrapper. Different f2py/f90wrap wrappers return
+    # different shapes: could be None, an int status, or a tuple that
+    # includes the status. Handle all robustly.
+    trace_istate = Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz_f, initial_gradpsi_f)
+    if trace_istate != 0 and verbose:
+        print(f"✗ Field line tracing failed with istate={trace_istate}")
+    return fieldline_data, trace_istate
 
 def compute_epstot(R0, extcur, initial_rz, initial_gradpsi=None,
                    fieldline_data=None, return_fieldline=False):
@@ -240,40 +247,24 @@ def compute_epstot(R0, extcur, initial_rz, initial_gradpsi=None,
             fieldline_data = np.asfortranarray(fieldline_data)
     
     # Call the Fortran compute_ripple
-    result = Effective_Ripple.compute_ripple(
+    epsilon_eff, bboundary, trace_istate = Effective_Ripple.compute_ripple(
         extcur_array, 
         initial_rz_array, 
         initial_gradpsi_array,
         fieldline_data
     )
-    if isinstance(result, tuple):
-        if len(result) >= 3 and np.isscalar(result[-1]):
-            epsilon_eff, bboundary = result[0], result[1]
-            error_flag = int(result[-1])
-        elif len(result) == 2:
-            epsilon_eff, bboundary = result
-            error_flag = 0
-        elif len(result) == 1 and np.isscalar(result[0]):
-            epsilon_eff = 0.0
-            bboundary = 0.0
-            error_flag = int(result[0])
-        else:
-            epsilon_eff, bboundary = result[0], result[1]
-            error_flag = 0
+    if trace_istate != 0:
+        epsilon_eff = None
+        bboundary = None
+        print(f"✗ compute_ripple failed with istate={trace_istate}")
     else:
-        epsilon_eff, bboundary = result, 0.0
-        error_flag = 0
-
-    if error_flag != 0:
-        raise RuntimeError(f"compute_epstot failed: {_decode_trace_error(error_flag)}")
-
-    epsilon_eff = epsilon_eff*R0**2  
-    print(f"✓ Effective ripple computed: ε_eff={epsilon_eff:.6e}, B_boundary={bboundary:.6f} T")
+        epsilon_eff = epsilon_eff*R0**2  
+        print(f"✓ Effective ripple computed: ε_eff={epsilon_eff:.6e}, B_boundary={bboundary:.6f} T")
     
     if return_fieldline:
-        return epsilon_eff, bboundary, fieldline_data
+        return epsilon_eff, bboundary, fieldline_data,trace_istate
     else:
-        return epsilon_eff, bboundary
+        return epsilon_eff, bboundary,trace_istate
 
 def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm):
     """
@@ -286,7 +277,7 @@ def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm):
     :param nfp: 场周期数
     :return: (volume, a_minor, iota)
     """
-    
+
     # 1. 数据重塑 (按照 R, Z, Phi 分离)
     # 假设 fieldline_data 是按 [nturn, nphi] 排列的场线点
     R = fieldline_data[:, 0].reshape((nturn, nphi)).T # (nphi, nturn)
@@ -726,94 +717,99 @@ def compute_initial_gradpsi_nemov(extcur, R0, Z0, phi0=0.0, verbose=True):
     return np.array([P0, G0, Q0], dtype=np.float64)
 
 
-def find_axis(initial_rz, timeout=2.0, xtol=1e-10, max_iter=200,verbose=False):
-    """
-    包装 find_axis 函数,设置超时限制
-    
-    Parameters
-    ----------
-    initial_rz : tuple
-        初始 (R, Z) 猜测值
-    timeout : float, optional
-        超时时间(秒),默认 2.0
-    xtol : float, optional
-        收敛容差
-    max_iter : int, optional
-        最大迭代次数
+
+
+def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, verbose=False):
         
-    Returns
-    -------
-    tuple
-        (axis_position, major_radius, fieldline_data, trace_error_flag)
-        超时时返回 (nan, nan, None, True)
-    """
-    
-    def _find_axis_worker():
-        from scipy.optimize import root
-        if verbose:
-            print(f"\nSearching for magnetic axis...")
-            print(f"  Initial guess: R={initial_rz[0]:.6f}, Z={initial_rz[1]:.6f}")
-            print(f"  Timeout: {timeout:.1f} s")
+    from scipy.optimize import root
+    if verbose:
+        print(f"\nSearching for magnetic axis...")
+        print(f"  Initial guess: R={initial_rz[0]:.6f}, Z={initial_rz[1]:.6f}")
 
-        # Effective_Ripple.set_trace_parameters(2, 360)
-        # initial_gradpsi = [0,0,0]
-        # initial_gradpsi = np.array(initial_gradpsi, dtype=np.float64, order='F')
+    # Effective_Ripple.set_trace_parameters(2, 360)
+    # initial_gradpsi = [0,0,0]
+    # initial_gradpsi = np.array(initial_gradpsi, dtype=np.float64, order='F')
 
-        final_fieldline_data = None
+    final_fieldline_data = None
 
-        def axis_residual(initial_rz):
-            nonlocal final_fieldline_data
-            initial_rz = np.array(initial_rz, dtype=np.float64, order='F')
-            fieldline_data = np.zeros((2*360, 20), dtype=np.float64, order='F')
-            try:
-                fieldline_data=trace_fieldline(initial_rz=initial_rz, initial_gradpsi=None, nturn=2, nphi=360)
-                final_R = fieldline_data[360, 0]
-                final_Z = fieldline_data[360, 1]
-                residual = np.array([final_R - initial_rz[0], final_Z - initial_rz[1]])
-                final_fieldline_data = fieldline_data.copy()
-                return residual
-            except Exception as e:
-                print(f"  Warning: Fieldline tracing failed: {e}")
-                return np.array([1e10, 1e10])
+    def axis_residual(candidate_rz):
+        candidate_rz = np.array(candidate_rz, dtype=np.float64, order='F')
 
-        # 单线程优化求解
-        result = root(
-            axis_residual,
-            initial_rz,
-            method='hybr',
-            tol=xtol,
-            options={
-                'maxfev': max_iter * (len(initial_rz) + 1),
-                'factor': 100
-            }
+        fieldline_data, trace_istate = trace_fieldline(
+            initial_rz=candidate_rz,
+            initial_gradpsi=None,
+            nturn=2,
+            nphi=360,
+            verbose=False
         )
-        
-        # 计算主半径 R0
-        if final_fieldline_data is not None:
-            R0 = np.mean(np.sqrt(final_fieldline_data[:360, 0]**2 + final_fieldline_data[:360, 1]**2))
-        else:
-            R0 = np.nan
-            raise RuntimeError("No valid fieldline data")
-        
-        distance = np.linalg.norm(result.fun)
-        if verbose:
-            print("  Optimization completed:")
-            print(f"    Axis position: R={result.x[0]:.10f}, Z={result.x[1]:.10f}")
-            print(f"    Major radius R0: {R0:.10f}")
-            print(f"    Distance error: {distance:.2e}")
-            print(f"    Converged: {result.success}")
-        
-        return result.x, R0, final_fieldline_data, False
 
-    # 使用 func_timeout 包装
-    try:
-        result = func_timeout(timeout, _find_axis_worker)
-        return result
+        if trace_istate != 0:
+            if verbose:
+                print(f" R={candidate_rz[0]:.6f}, Z={candidate_rz[1]:.6f} Warning: trace_fieldline failed with ISTATE={trace_istate}")
+            return np.array([1e10, 1e10])
+
+        final_R = fieldline_data[360, 0]
+        final_Z = fieldline_data[360, 1]
+        return np.array([final_R - candidate_rz[0], final_Z - candidate_rz[1]])
+
+    trial_points = [
+        np.array(initial_rz, dtype=np.float64),
+        np.array([initial_rz[0] + delta_r, initial_rz[1]], dtype=np.float64),
+        np.array([initial_rz[0] - delta_r, initial_rz[1]], dtype=np.float64),
+    ]
+
+    trial_results = []
+    for candidate_rz in trial_points:
+        residual = axis_residual(candidate_rz)
+        trial_results.append((np.linalg.norm(residual), candidate_rz, residual))
+
+    trial_results.sort(key=lambda item: item[0])
+    start_rz = trial_results[0][1]
+
+    if verbose:
+        print("  Initial candidate residuals:")
+        for residual_norm, candidate_rz, _ in trial_results:
+            print(f"    R={candidate_rz[0]:.6f}, Z={candidate_rz[1]:.6f}, residual={residual_norm:.2e}")
+        print(f"  Selected start point: R={start_rz[0]:.6f}, Z={start_rz[1]:.6f}")
+
+    # 单线程优化求解
+    result = root(
+        axis_residual,
+        start_rz,
+        method='hybr',
+        tol=xtol,
+        options={
+            'maxfev': max_iter,
+            'factor': 100
+        }
+    )
+
+    if result.success:
+        final_fieldline_data, trace_istate = trace_fieldline(
+            initial_rz=result.x,
+            initial_gradpsi=None,
+            nturn=2,
+            nphi=360,
+            verbose=False
+        )
+        if trace_istate != 0:
+            raise RuntimeError(f"trace_fieldline failed at optimized axis with ISTATE={trace_istate}")
+    else:
+        raise RuntimeError("Axis optimization did not converge")
     
-    except FunctionTimedOut:
-        print(f"  ✗ Timeout: Magnetic axis search exceeded {timeout:.1f} s", flush=True)
-        return np.array([np.nan, np.nan]), np.nan, None, True
+    # 计算主半径 R0
+    if final_fieldline_data is not None:
+        R0 = np.mean(np.sqrt(final_fieldline_data[:360, 0]**2 + final_fieldline_data[:360, 1]**2))
+    else:
+        R0 = np.nan
+        raise RuntimeError("No valid fieldline data")
     
-    except Exception as e:
-        print(f"  ✗ Error during axis search: {e}", flush=True)
-        return np.array([np.nan, np.nan]), np.nan, None, True
+    distance = np.linalg.norm(result.fun)
+    if verbose:
+        print("  Optimization completed:")
+        print(f"    Axis position: R={result.x[0]:.10f}, Z={result.x[1]:.10f}")
+        print(f"    Major radius R0: {R0:.10f}")
+        print(f"    Distance error: {distance:.2e}")
+        print(f"    Converged: {result.success}")
+    
+    return result.x, R0, final_fieldline_data, False

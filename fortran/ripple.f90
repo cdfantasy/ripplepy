@@ -22,7 +22,7 @@ module effective_ripple
     ! Tracing parameters (shared by all scans)
     integer :: nturn, nphi_trace
     integer :: npoints
-    
+    integer :: trace_verbose = 0
     ! Physical constants
     real(8), parameter :: PI = 3.141592653589793d0
     
@@ -40,7 +40,7 @@ module effective_ripple
     real(8), allocatable :: fieldline_gradpsi_data_current(:,:)
     real(8) :: Bboundary_current
     real(8) :: epsilon_eff_current
-    integer :: trace_error_code
+    ! integer :: trace_error_code
 
 contains
 
@@ -120,7 +120,7 @@ contains
                         fherm_br_arr(ic,:,:,:,:), nr, nz, &
                         ilinx, iliny, ilinz, 0, 0, 0, ier)
         if (ier /= 0) then
-          write(*,'(A,I0,A,I0)') 'Error in r8akherm3p for Br (coil ', ic, '): ier = ', ier
+          if (trace_verbose /= 0) write(*,'(A,I0,A,I0)') 'Error in r8akherm3p for Br (coil ', ic, '): ier = ', ier
           return
         endif
 
@@ -128,7 +128,7 @@ contains
                         fherm_bz_arr(ic,:,:,:,:), nr, nz, &
                         ilinx, iliny, ilinz, 0, 0, 0, ier)
         if (ier /= 0) then
-          write(*,'(A,I0,A,I0)') 'Error in r8akherm3p for Bz (coil ', ic, '): ier = ', ier
+          if (trace_verbose /= 0) write(*,'(A,I0,A,I0)') 'Error in r8akherm3p for Bz (coil ', ic, '): ier = ', ier
           return
         endif
 
@@ -136,12 +136,12 @@ contains
                         fherm_bp_arr(ic,:,:,:,:), nr, nz, &
                         ilinx, iliny, ilinz, 0, 0, 0, ier)
         if (ier /= 0) then
-          write(*,'(A,I0,A,I0)') 'Error in r8akherm3p for Bp (coil ', ic, '): ier = ', ier
+          if (trace_verbose /= 0) write(*,'(A,I0,A,I0)') 'Error in r8akherm3p for Bp (coil ', ic, '): ier = ', ier
           return
         endif
       end do
 
-      write(*,'(A,I0,A)') 'Field initialization completed for ', nextcur, ' coil groups.'
+      if (trace_verbose /= 0) write(*,'(A,I0,A)') 'Field initialization completed for ', nextcur, ' coil groups.'
     end subroutine initialize_field
 
     !============================================================================
@@ -162,6 +162,23 @@ contains
     end subroutine set_trace_parameters
 
     !============================================================================
+    ! Subroutine: set_trace_verbose
+    ! Purpose: allow external (e.g. Python) code to enable/disable module writes
+    ! Input: flag - 0 to silence writes, non-zero to enable
+    !============================================================================
+    subroutine set_trace_verbose(flag)
+      implicit none
+      integer, intent(in) :: flag
+      trace_verbose = flag
+    end subroutine set_trace_verbose
+
+    function get_trace_verbose() result(flag)
+      implicit none
+      integer :: flag
+      flag = trace_verbose
+    end function get_trace_verbose
+
+    !============================================================================
     ! Subroutine: compute_ripple
     ! Purpose: Main computation interface - given extcur and initial conditions, compute effective ripple
     ! Input: extcur - current combination
@@ -172,7 +189,7 @@ contains
     !         Bboundary - boundary magnetic field strength
     !============================================================================
     subroutine compute_ripple(extcur, initial_rz, initial_gradpsi, &
-                         epsilon_eff, Bboundary, fieldline_data, error_flag)
+                         epsilon_eff, Bboundary, fieldline_data, trace_istate)
       implicit none
       
       real(8), intent(in) :: extcur(:)
@@ -180,20 +197,19 @@ contains
       real(8), intent(in) :: initial_gradpsi(3)
       real(8), intent(out) :: epsilon_eff
       real(8), intent(out) :: Bboundary
-      real(8), intent(out), optional :: fieldline_data(:, :)
-      integer, intent(out), optional :: error_flag
+      real(8), intent(out) :: fieldline_data(:, :)
+      integer, intent(out) :: trace_istate
       
       real(8), allocatable :: fieldline_local(:,:)
       real(8), allocatable :: geocur(:)
-      integer :: trace_istate
 
-      if (present(error_flag)) error_flag = 0
+      trace_istate = 0
       
       if (.not. allocated(fherm_br_arr)) then
         write(*,'(A)') 'Error: Field not initialized. Call initialize_field first.'
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
-        if (present(error_flag)) error_flag = -100
+        trace_istate = -100
         return
       endif
       
@@ -201,7 +217,7 @@ contains
         write(*,'(A)') 'Error: Trace parameters not set. Call set_trace_parameters first.'
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
-        if (present(error_flag)) error_flag = -101
+        trace_istate = -101
         return
       endif
 
@@ -219,7 +235,6 @@ contains
       if (trace_istate /= 0) then
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
-        if (present(error_flag)) error_flag = trace_istate
         deallocate(fieldline_local)
         return
       endif
@@ -236,13 +251,13 @@ contains
       allocate(fieldline_gradpsi_data_current(npoints, 20))
       fieldline_gradpsi_data_current = fieldline_local
 
-      if (present(fieldline_data)) then
-        if (size(fieldline_data, 1) >= npoints .and. size(fieldline_data, 2) >= 20) then
-          fieldline_data(1:npoints, 1:20) = fieldline_local
-        else
-          write(*,'(A)') 'Warning: fieldline_data array too small'
-        endif
+
+      if (size(fieldline_data, 1) >= npoints .and. size(fieldline_data, 2) >= 20) then
+        fieldline_data(1:npoints, 1:20) = fieldline_local
+      else
+        write(*,'(A)') 'Warning: fieldline_data array too small'
       endif
+
       deallocate(fieldline_local, geocur)
       
     end subroutine compute_ripple
@@ -280,9 +295,9 @@ contains
     ! Interpolate magnetic field and its derivatives at a given point
     !============================================================================
     subroutine interpolate_field(r, z, phi, br_interp, bz_interp, bp_interp, &
-                                 br_r, br_z, br_phi, &
-                                 bz_r, bz_z, bz_phi, &
-                                 bp_r, bp_z, bp_phi, error_flag)
+                   br_r, br_z, br_phi, &
+                   bz_r, bz_z, bz_phi, &
+                   bp_r, bp_z, bp_phi, trace_istate)
       implicit none
       integer, parameter :: R8=SELECTED_REAL_KIND(12,100)
       real(8), intent(in) :: r, z, phi
@@ -290,11 +305,18 @@ contains
       real(8), intent(out) :: br_r, br_z, br_phi
       real(8), intent(out) :: bz_r, bz_z, bz_phi
       real(8), intent(out) :: bp_r, bp_z, bp_phi
-      integer, intent(out), optional :: error_flag
-      integer :: ict(8), ier
+      integer, intent(out) :: trace_istate
+      integer :: ict(8), ier 
       real(8) :: fval(8)
 
-      if (present(error_flag)) error_flag = 0
+      trace_istate = 0
+      if (r < rmin .or. r > rmax .or. z < zmin .or. z > zmax) then
+        trace_istate = -1000
+        if (trace_verbose /= 0) write(*, '(A,E15.6,A,E15.6,A)') &
+        'Error: Point out of bounds for interpolation: R=', r, ', Z=', z, ', Phi=', phi
+        return
+      end if
+
 
       ict(1:8) = 0
       ict(1) = 1; ict(2) = 1; ict(3) = 1; ict(4) = 1
@@ -302,11 +324,12 @@ contains
       call r8herm3ev(r, z, phi, r_grid, nr, z_grid, nz, phi_grid, nphi, &
                      ilinx, iliny, ilinz, fherm_br_sum, nr, nz, ict, fval, ier)
       if (ier /= 0) then
-        write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
+        trace_istate = -1000 - abs(ier)
+        if (trace_verbose /= 0) write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
         'Error in R: ', r, ', Z: ', z, ', Phi: ', phi, &
         ' for Br interpolation: ier = ', ier
-        trace_error_code = -1000 - abs(ier)
-        if (present(error_flag)) error_flag = trace_error_code
+        ! trace_error_code = -1000 - abs(ier)
+        ! if (present(trace_istate)) trace_istate = trace_error_code
         return
       endif
       br_interp = fval(1); br_r = fval(2); br_z = fval(3); br_phi = fval(4)
@@ -314,11 +337,12 @@ contains
       call r8herm3ev(r, z, phi, r_grid, nr, z_grid, nz, phi_grid, nphi, &
                      ilinx, iliny, ilinz, fherm_bz_sum, nr, nz, ict, fval, ier)
       if (ier /= 0) then
-        write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
+        trace_istate = -1000 - abs(ier)
+        if (trace_verbose /= 0) write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
         'Error in R: ', r, ', Z: ', z, ', Phi: ', phi, &
         ' for Bz interpolation: ier = ', ier
-        trace_error_code = -1000 - abs(ier)
-        if (present(error_flag)) error_flag = trace_error_code
+        ! trace_error_code = -1000 - abs(ier)
+        ! if (present(trace_istate)) trace_istate = trace_error_code
         return
       endif
       bz_interp = fval(1); bz_r = fval(2); bz_z = fval(3); bz_phi = fval(4)
@@ -326,11 +350,12 @@ contains
       call r8herm3ev(r, z, phi, r_grid, nr, z_grid, nz, phi_grid, nphi, &
                      ilinx, iliny, ilinz, fherm_bp_sum, nr, nz, ict, fval, ier)
       if (ier /= 0) then
-        write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
+        trace_istate = -1000 - abs(ier)
+        if (trace_verbose /= 0) write(*, '(A,E15.6,A,E15.6,A,E15.6,A,I0)') &
         'Error in R: ', r, ', Z: ', z, ', Phi: ', phi, &
         ' for Bp interpolation: ier = ', ier
-        trace_error_code = -1000 - abs(ier)
-        if (present(error_flag)) error_flag = trace_error_code
+        ! trace_error_code = -1000 - abs(ier)
+        ! if (present(trace_istate)) trace_istate = trace_error_code
         return
       endif
       bp_interp = fval(1); bp_r = fval(2); bp_z = fval(3); bp_phi = fval(4)
@@ -340,12 +365,12 @@ contains
     ! Internal subroutine: trace_gradpsi_internal
     ! Trace field lines and compute grad_psi evolution
     !============================================================================
-    subroutine trace_gradpsi_internal(fieldline_gradpsi_data, initial_rz, initial_gradpsi, error_flag)
+    subroutine trace_gradpsi_internal(fieldline_gradpsi_data, initial_rz, initial_gradpsi, trace_istate)
       implicit none
       real(8), intent(out) :: fieldline_gradpsi_data(:, :)
       real(8), intent(in)  :: initial_rz(2)
       real(8), intent(in)  :: initial_gradpsi(3)
-      integer, intent(out), optional :: error_flag
+      integer, intent(out) :: trace_istate
 
       integer :: i
       integer :: neq, itol, itask, iopt, lrw, liw, mf
@@ -356,12 +381,12 @@ contains
       integer, allocatable :: iwork(:)
       real(8) :: phi_for_interp
 
-      if (present(error_flag)) error_flag = 0
+      trace_istate = 0
 
-      trace_error_code = 0
+      ! trace_istate = 0
 
       if (npoints <= 0) then
-        if (present(error_flag)) error_flag = -101
+         trace_istate = -101
         return
       end if
 
@@ -406,10 +431,12 @@ contains
                               fieldline_gradpsi_data(i, 17), &
                               fieldline_gradpsi_data(i, 18), &
                               fieldline_gradpsi_data(i, 19), &
-                              fieldline_gradpsi_data(i, 20), interp_istate)
-
-        if (interp_istate /= 0) then
-          if (present(error_flag)) error_flag = interp_istate
+                              fieldline_gradpsi_data(i, 20),trace_istate)
+        if (trace_istate /= 0) then
+          if (trace_verbose /= 0) write(*, '(A,I0)') 'Warning: Interpolation error during trace at point ', i
+          if (i <= npoints) then
+            fieldline_gradpsi_data(i:npoints, 1:20) = 0.0d0
+          end if
           exit
         end if
 
@@ -435,18 +462,17 @@ contains
                     istate_local, iopt, rwork, lrw, &
                     iwork, liw, jacobian_stub_5d, mf)
 
+        if (istate_local < 0) then
+          trace_istate = istate_local
+          if (trace_verbose /= 0) write(*, '(A, I0)') 'Warning: LSODE solver returned ISTATE = ', istate_local
+          if (i <= npoints) then
+            fieldline_gradpsi_data(i:npoints, 1:20) = 0.0d0
+          end if
+          exit
+        end if
+
         phi = phi_stop
 
-        if (trace_error_code /= 0) then
-          if (present(error_flag)) error_flag = trace_error_code
-          exit
-        end if
-
-        if (istate_local < 0) then
-          if (present(error_flag)) error_flag = istate_local
-          write(*, '(A, I0)') 'Warning: LSODE solver returned ISTATE = ', istate_local
-          exit
-        end if
       end do
 
       deallocate(v, rwork, iwork)
@@ -483,6 +509,7 @@ contains
       real(8) :: bp_r, bp_z, bp_phi
       real(8) :: P, G, Q
       real(8) :: zero_threshold
+      integer :: trace_istate
 
       r = v(1)
       z = v(2)
@@ -492,10 +519,6 @@ contains
       Q = v(5)
       !P=∂ψ/∂R, G=∂ψ/∂Z, Q=(∂ψ/∂φ)
 
-      if (trace_error_code /= 0) then
-        vdot(1:neq) = 0.0d0
-        return
-      end if
 
       phi_normalized = phi
       call normalize_phi(phi_normalized)
@@ -504,12 +527,7 @@ contains
                             br, bz, bp, &
                             br_r, br_z, br_phi, &
                             bz_r, bz_z, bz_phi, &
-                            bp_r, bp_z, bp_phi)
-
-      if (trace_error_code /= 0) then
-        vdot(1:neq) = 0.0d0
-        return
-      end if
+                            bp_r, bp_z, bp_phi, trace_istate)
 
       zero_threshold = 1.0d-15
       if (abs(bp) < zero_threshold) then
@@ -776,7 +794,7 @@ contains
       npts = size(fieldline_gradpsi_data, 1)
 
       if (npts < 2) then
-        write(*, '(A)') 'Error: Not enough data points for ripple calculation'
+        if (trace_verbose /= 0) write(*, '(A)') 'Error: Not enough data points for ripple calculation'
         epsilon_eff = 0.0d0
         return
       end if
@@ -828,7 +846,7 @@ contains
       end do
       
       if (bmax < 1.0d-15 .or. bmax <= bmin) then
-        write(*, '(A)') 'Error: Invalid magnetic field range'
+        if (trace_verbose /= 0) write(*, '(A)') 'Error: Invalid magnetic field range'
         epsilon_eff = 0.0d0
         deallocate(h_i, h_j, i_j)
         return
@@ -957,5 +975,244 @@ contains
 
     end subroutine effective_ripple_internal
 
+
+  !=======================================================================
+! 优化版 effective_ripple_internal
+! 采用：Gauss-Legendre求积 + 累积数组 + 显式弹跳段检测
+!=======================================================================
+!=======================================================================
+! 优化版 effective_ripple_internal（已修复声明位置）
+! Gauss-Legendre + 累积数组 + 显式弹跳段
+!=======================================================================
+! subroutine effective_ripple_internal(fieldline_data, geocur, epsilon_eff)
+!     implicit none
+!     real(8), intent(in)  :: fieldline_data(:, :)
+!     real(8), intent(in)  :: geocur(:)
+!     real(8), intent(out) :: epsilon_eff
+
+!     ! ====================== 参数 ======================
+!     integer, parameter :: n_gauss = 64
+!     real(8), parameter :: EPS = 1.0d-14
+!     real(8), parameter :: PI = 3.141592653589793d0
+
+!     ! ====================== 变量声明 ======================
+!     integer :: npts, i, j, nseg
+!     real(8) :: b0, Ls, e1, e2, e3, factor
+!     real(8) :: r, Bphi, dphi, bp, H2_over_I
+!     real(8) :: H_seg, I_seg
+
+!     real(8), allocatable :: B(:), gp(:), kg(:), ds_over_B(:)
+!     real(8), allocatable :: cum_dsB(:), cum_dsB_gp(:)
+!     real(8), allocatable :: x_g(:), w_g(:)
+!     integer, allocatable :: min_idx(:)
+
+!     ! ====================== 初始化 ======================
+!     npts = size(fieldline_data, 1)
+!     epsilon_eff = 0.0d0
+
+!     if (npts < 20) return
+
+!     allocate(B(npts), gp(npts), kg(npts), ds_over_B(npts))
+!     allocate(cum_dsB(0:npts), cum_dsB_gp(0:npts))
+
+!     do i = 1, npts
+!         B(i)  = fieldline_data(i, 7)
+!         gp(i) = fieldline_data(i, 11)
+!         kg(i) = geocur(i)
+!     end do
+
+!     b0 = maxval(B)
+!     if (b0 < 1.0d-12) then
+!         deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp)
+!         return
+!     end if
+
+!     ! ====================== 2. ds/B 及累积积分 ======================
+!     cum_dsB(0) = 0.0d0
+!     cum_dsB_gp(0) = 0.0d0
+!     Ls = 0.0d0
+
+!     do i = 1, npts-1
+!         r    = fieldline_data(i, 1)
+!         Bphi = fieldline_data(i, 6)
+!         dphi = 2.0d0 * PI / real(nphi_trace, kind=8)
+
+!         if (abs(Bphi) > 1.0d-14) then
+!             ds_over_B(i) = r * dphi / abs(Bphi)
+!         else
+!             ds_over_B(i) = 0.0d0
+!         end if
+
+!         cum_dsB(i)    = cum_dsB(i-1)    + ds_over_B(i)
+!         cum_dsB_gp(i) = cum_dsB_gp(i-1) + ds_over_B(i) * gp(i)
+!         Ls = Ls + ds_over_B(i) * B(i)
+!     end do
+
+!     cum_dsB(npts)    = cum_dsB(npts-1)
+!     cum_dsB_gp(npts) = cum_dsB_gp(npts-1)
+
+!     e2 = cum_dsB(npts)
+!     e3 = cum_dsB_gp(npts)
+
+!     if (e2 < EPS .or. e3 < EPS) then
+!         deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp)
+!         return
+!     end if
+
+!     ! ====================== 3. 局部极小值 ======================
+!     call find_local_minima(B, min_idx, nseg)
+
+!     if (nseg < 2) then
+!         deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp, min_idx)
+!         return
+!     end if
+
+!     ! ====================== 4. Gauss-Legendre ======================
+!     allocate(x_g(n_gauss), w_g(n_gauss))
+!     call gauss_legendre_01(n_gauss, x_g, w_g)
+
+!     e1 = 0.0d0
+
+!     do j = 1, n_gauss
+!         bp = 1.0d0 + x_g(j) * (b0 - 1.0d0)/b0
+!         H2_over_I = 0.0d0
+
+!         do i = 1, nseg-1
+!             call integrate_bounce_segment(bp, min_idx(i), min_idx(i+1), &
+!                 B, gp, kg, ds_over_B, H_seg, I_seg)
+!             if (I_seg > EPS) then
+!                 H2_over_I = H2_over_I + H_seg**2 / I_seg
+!             end if
+!         end do
+
+!         e1 = e1 + H2_over_I * w_g(j)
+!     end do
+
+!     ! ====================== 5. 最终结果 ======================
+!     factor = (PI * 1.0d0**2) / (8.0d0 * sqrt(2.0d0))
+!     epsilon_eff = (e1 * e2 / (e3**2)) * factor * b0
+
+!     ! 清理内存
+!     deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp, &
+!                x_g, w_g, min_idx)
+
+! end subroutine effective_ripple_internal
+
+
+!=======================================================================
+! Gauss-Legendre 节点和权重 (区间 [0,1])
+!=======================================================================
+subroutine gauss_legendre_01(ng, x, w)
+    implicit none
+    integer, intent(in)  :: ng
+    real(8), intent(out) :: x(ng), w(ng)
+    real(8), allocatable :: xt(:), wt(:)
+
+    allocate(xt(ng), wt(ng))
+    call gauleg(-1.0d0, 1.0d0, xt, wt, ng)
+    
+    x = 0.5d0 * (xt + 1.0d0)
+    w = 0.5d0 * wt
+    
+    deallocate(xt, wt)
+end subroutine gauss_legendre_01
+
+!=======================================================================
+! 经典 Gauss-Legendre (区间 [-1,1])
+!=======================================================================
+subroutine gauleg(x1, x2, x, w, n)
+    implicit none
+    real(8), intent(in)  :: x1, x2
+    integer, intent(in)  :: n
+    real(8), intent(out) :: x(n), w(n)
+
+    integer, parameter :: MAXIT = 20
+    real(8), parameter :: EPS = 3.0d-14
+    integer :: i, j, k, m
+    real(8) :: xm, xl, z, z1, p1, p2, p3, pp
+
+    m = (n + 1)/2
+    xm = 0.5d0*(x2 + x1)
+    xl = 0.5d0*(x2 - x1)
+
+    do i = 1, m
+        z = cos(PI * (real(i,8) - 0.25d0) / (real(n,8) + 0.5d0))
+        do j = 1, MAXIT
+            p1 = 1.0d0; p2 = 0.0d0
+            do k = 1, n
+                p3 = p2
+                p2 = p1
+                p1 = ((2.0d0*k - 1.0d0)*z*p2 - (k-1.0d0)*p3) / real(k,8)
+            end do
+            pp = n * (z*p1 - p2) / (z*z - 1.0d0)
+            z1 = z
+            z  = z1 - p1/pp
+            if (abs(z - z1) < EPS) exit
+        end do
+        x(i)     = xm - xl*z
+        x(n+1-i) = xm + xl*z
+        w(i)     = 2.0d0*xl / ((1.0d0 - z*z)*pp*pp)
+        w(n+1-i) = w(i)
+    end do
+end subroutine gauleg
+
+!=======================================================================
+! 查找 B 的局部极小值索引
+!=======================================================================
+subroutine find_local_minima(B, idx, n)
+    real(8), intent(in) :: B(:)
+    integer, allocatable, intent(out) :: idx(:)
+    integer, intent(out) :: n
+
+    integer :: i, m, count
+    m = size(B)
+    allocate(idx(m+2))
+
+    idx(1) = 1
+    count = 1
+
+    do i = 2, m-1
+        if (B(i) < B(i-1) .and. B(i) < B(i+1)) then
+            count = count + 1
+            idx(count) = i
+        end if
+    end do
+
+    idx(count+1) = m
+    n = count + 1
+end subroutine find_local_minima
+
+!=======================================================================
+! 单弹跳段积分
+!=======================================================================
+subroutine integrate_bounce_segment(bp, i1, i2, B, gp, kg, dsB, Hout, Iout)
+    real(8), intent(in)  :: bp
+    integer, intent(in)  :: i1, i2
+    real(8), intent(in)  :: B(:), gp(:), kg(:), dsB(:)
+    real(8), intent(out) :: Hout, Iout
+
+    integer :: k
+    real(8) :: b_loc, termH, termI, sqrtH, sqrtI, b0
+
+    b0 = maxval(B)
+    Hout = 0.0d0
+    Iout = 0.0d0
+
+    do k = i1, i2-1
+        b_loc = B(k) / b0
+        if (bp <= b_loc) cycle
+
+        sqrtH = sqrt(bp - b_loc)
+        sqrtI = sqrt(1.0d0 - b_loc / bp)
+
+        termH = (1.0d0/bp) * dsB(k) / B(k) * sqrtH * &
+                (4.0d0*b0/B(k) - 1.0d0/bp) * gp(k) * kg(k)
+
+        termI = dsB(k) / B(k) * sqrtI
+
+        Hout = Hout + termH
+        Iout = Iout + termI
+    end do
+end subroutine integrate_bounce_segment
     
 end module effective_ripple

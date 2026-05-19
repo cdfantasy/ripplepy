@@ -21,16 +21,16 @@ from .ripple import (
     set_trace_parameters,
     trace_fieldline,
     calculate_plasma_params,
-    # compute_kg_cylindrical,
-    # compute_effective_ripple
+    set_trace_verbose,
+    get_trace_verbose,
 )
-from .optimize import (
-    ObjectiveFunction,
-    OptimizationConfig,
-    differential_evolution,
-    mutate_de,
-    crossover_de,
-)
+# from .optimize import (
+#     ObjectiveFunction,
+#     OptimizationConfig,
+#     differential_evolution,
+#     mutate_de,
+#     crossover_de,
+# )
 
 __version__ = "0.1.0"
 __all__ = [
@@ -45,11 +45,11 @@ __all__ = [
     "find_axis",
     "set_trace_parameters",
     "calculate_plasma_params",
-    "ObjectiveFunction",
-    "OptimizationConfig",
-    "differential_evolution",
-    "mutate_de",
-    "crossover_de",
-    # "compute_kg_cylindrical",
-    # "compute_effective_ripple"
+    # "ObjectiveFunction",
+    # "OptimizationConfig",
+    # "differential_evolution",
+    # "mutate_de",
+    # "crossover_de",
+    "set_trace_verbose",
+    "get_trace_verbose",
 ]
