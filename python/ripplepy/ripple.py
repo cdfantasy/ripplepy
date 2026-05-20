@@ -792,24 +792,28 @@ def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, verbose=False)
             nphi=360,
             verbose=False
         )
-        if trace_istate != 0:
-            raise RuntimeError(f"trace_fieldline failed at optimized axis with ISTATE={trace_istate}")
+
     else:
-        raise RuntimeError("Axis optimization did not converge")
+        # print("Axis optimization did not converge")
+        trace_istate = -1
+
     
     # 计算主半径 R0
-    if final_fieldline_data is not None:
+    if final_fieldline_data is not None and trace_istate == 0:
         R0 = np.mean(np.sqrt(final_fieldline_data[:360, 0]**2 + final_fieldline_data[:360, 1]**2))
     else:
         R0 = np.nan
-        raise RuntimeError("No valid fieldline data")
+        print("No valid fieldline data")
+    if trace_istate == 0:
+        distance = np.linalg.norm(result.fun)
+        if verbose:
+            print("  Optimization completed:")
+            print(f"    Axis position: R={result.x[0]:.10f}, Z={result.x[1]:.10f}")
+            print(f"    Major radius R0: {R0:.10f}")
+            print(f"    Distance error: {distance:.2e}")
+            print(f"    Converged: {result.success}")
     
-    distance = np.linalg.norm(result.fun)
-    if verbose:
-        print("  Optimization completed:")
-        print(f"    Axis position: R={result.x[0]:.10f}, Z={result.x[1]:.10f}")
-        print(f"    Major radius R0: {R0:.10f}")
-        print(f"    Distance error: {distance:.2e}")
-        print(f"    Converged: {result.success}")
-    
-    return result.x, R0, final_fieldline_data, False
+        return result.x, R0, final_fieldline_data, True
+    else:
+        print("  Optimization failed to converge.")
+        return None, None, None, False

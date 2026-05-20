@@ -799,35 +799,6 @@ contains
         return
       end if
       
-      ! ! DEBUG: Check input data ranges
-      ! block
-      !   real(8) :: b_min_chk, b_max_chk, gp_min_chk, gp_max_chk, bphi_min_chk, bphi_max_chk
-      !   integer :: ii
-      !   b_min_chk = fieldline_gradpsi_data(1, 7)
-      !   b_max_chk = fieldline_gradpsi_data(1, 7)
-      !   gp_min_chk = fieldline_gradpsi_data(1, 11)
-      !   gp_max_chk = fieldline_gradpsi_data(1, 11)
-      !   bphi_min_chk = abs(fieldline_gradpsi_data(1, 6))
-      !   bphi_max_chk = abs(fieldline_gradpsi_data(1, 6))
-        
-      !   do ii = 2, npts
-      !     b_min_chk = min(b_min_chk, fieldline_gradpsi_data(ii, 7))
-      !     b_max_chk = max(b_max_chk, fieldline_gradpsi_data(ii, 7))
-      !     gp_min_chk = min(gp_min_chk, fieldline_gradpsi_data(ii, 11))
-
-
-      !     gp_max_chk = max(gp_max_chk, fieldline_gradpsi_data(ii, 11))
-      !     bphi_min_chk = min(bphi_min_chk, abs(fieldline_gradpsi_data(ii, 6)))
-      !     bphi_max_chk = max(bphi_max_chk, abs(fieldline_gradpsi_data(ii, 6)))
-      !   end do
-        
-      !   write(*, '(A)') '========== DEBUG: effective_ripple_internal input =========='
-      !   write(*, '(A, I0)') 'npts = ', npts
-      !   write(*, '(A, E15.6, A, E15.6)') 'B range:       [', b_min_chk, ', ', b_max_chk, ']'
-      !   write(*, '(A, E15.6, A, E15.6)') '|∇ψ| range:    [', gp_min_chk, ', ', gp_max_chk, ']'
-      !   write(*, '(A, E15.6, A, E15.6)') '|Bphi| range:  [', bphi_min_chk, ', ', bphi_max_chk, ']'
-      !   write(*, '(A)') '=========================================================='
-      ! end block
       
       n_b = 5000
       n_w = 5000
@@ -976,13 +947,9 @@ contains
     end subroutine effective_ripple_internal
 
 
-  !=======================================================================
-! 优化版 effective_ripple_internal
-! 采用：Gauss-Legendre求积 + 累积数组 + 显式弹跳段检测
 !=======================================================================
-!=======================================================================
-! 优化版 effective_ripple_internal（已修复声明位置）
-! Gauss-Legendre + 累积数组 + 显式弹跳段
+! 最终修正版 effective_ripple_internal
+! 已修复所有声明位置 + 使用平均磁场 B0 + 正确Gauss映射
 !=======================================================================
 ! subroutine effective_ripple_internal(fieldline_data, geocur, epsilon_eff)
 !     implicit none
@@ -990,64 +957,50 @@ contains
 !     real(8), intent(in)  :: geocur(:)
 !     real(8), intent(out) :: epsilon_eff
 
-!     ! ====================== 参数 ======================
 !     integer, parameter :: n_gauss = 64
 !     real(8), parameter :: EPS = 1.0d-14
+!     real(8), parameter :: SAFETY = 1.03d0
 !     real(8), parameter :: PI = 3.141592653589793d0
 
-!     ! ====================== 变量声明 ======================
 !     integer :: npts, i, j, nseg
-!     real(8) :: b0, Ls, e1, e2, e3, factor
-!     real(8) :: r, Bphi, dphi, bp, H2_over_I
-!     real(8) :: H_seg, I_seg
+!     real(8) :: b0_ref, bp_min, bp_max, e1, e2, e3, factor
+!     real(8) :: r, Bphi, dphi, bp, xi, H2_over_I, H_seg, I_seg
 
 !     real(8), allocatable :: B(:), gp(:), kg(:), ds_over_B(:)
 !     real(8), allocatable :: cum_dsB(:), cum_dsB_gp(:)
 !     real(8), allocatable :: x_g(:), w_g(:)
 !     integer, allocatable :: min_idx(:)
 
-!     ! ====================== 初始化 ======================
 !     npts = size(fieldline_data, 1)
 !     epsilon_eff = 0.0d0
-
 !     if (npts < 20) return
 
 !     allocate(B(npts), gp(npts), kg(npts), ds_over_B(npts))
 !     allocate(cum_dsB(0:npts), cum_dsB_gp(0:npts))
 
-!     do i = 1, npts
-!         B(i)  = fieldline_data(i, 7)
-!         gp(i) = fieldline_data(i, 11)
-!         kg(i) = geocur(i)
-!     end do
+!     B  = fieldline_data(:,7)
+!     gp = fieldline_data(:,11)
+!     kg = geocur
 
-!     b0 = maxval(B)
-!     if (b0 < 1.0d-12) then
-!         deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp)
-!         return
-!     end if
+!     b0_ref = sum(B) / real(npts,8)          ! 平均磁场
 
-!     ! ====================== 2. ds/B 及累积积分 ======================
+!     bp_min = minval(B) / b0_ref
+!     bp_max = maxval(B) / b0_ref * SAFETY
+
+!     ! ====================== ds/B 累积 ======================
 !     cum_dsB(0) = 0.0d0
 !     cum_dsB_gp(0) = 0.0d0
-!     Ls = 0.0d0
 
 !     do i = 1, npts-1
-!         r    = fieldline_data(i, 1)
-!         Bphi = fieldline_data(i, 6)
+!         r    = fieldline_data(i,1)
+!         Bphi = fieldline_data(i,6)
 !         dphi = 2.0d0 * PI / real(nphi_trace, kind=8)
 
-!         if (abs(Bphi) > 1.0d-14) then
-!             ds_over_B(i) = r * dphi / abs(Bphi)
-!         else
-!             ds_over_B(i) = 0.0d0
-!         end if
+!         ds_over_B(i) = merge(r * dphi / abs(Bphi), 0.0d0, abs(Bphi)>1.0d-14)
 
 !         cum_dsB(i)    = cum_dsB(i-1)    + ds_over_B(i)
 !         cum_dsB_gp(i) = cum_dsB_gp(i-1) + ds_over_B(i) * gp(i)
-!         Ls = Ls + ds_over_B(i) * B(i)
 !     end do
-
 !     cum_dsB(npts)    = cum_dsB(npts-1)
 !     cum_dsB_gp(npts) = cum_dsB_gp(npts-1)
 
@@ -1059,42 +1012,34 @@ contains
 !         return
 !     end if
 
-!     ! ====================== 3. 局部极小值 ======================
 !     call find_local_minima(B, min_idx, nseg)
-
 !     if (nseg < 2) then
 !         deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp, min_idx)
 !         return
 !     end if
 
-!     ! ====================== 4. Gauss-Legendre ======================
 !     allocate(x_g(n_gauss), w_g(n_gauss))
 !     call gauss_legendre_01(n_gauss, x_g, w_g)
 
 !     e1 = 0.0d0
-
 !     do j = 1, n_gauss
-!         bp = 1.0d0 + x_g(j) * (b0 - 1.0d0)/b0
-!         H2_over_I = 0.0d0
+!         xi = 2.0d0 * x_g(j) - 1.0d0
+!         bp = 0.5d0*(bp_max + bp_min) + 0.5d0*(bp_max - bp_min)*xi
 
+!         H2_over_I = 0.0d0
 !         do i = 1, nseg-1
 !             call integrate_bounce_segment(bp, min_idx(i), min_idx(i+1), &
-!                 B, gp, kg, ds_over_B, H_seg, I_seg)
-!             if (I_seg > EPS) then
-!                 H2_over_I = H2_over_I + H_seg**2 / I_seg
-!             end if
+!                  B, gp, kg, ds_over_B, b0_ref, H_seg, I_seg)
+!             if (I_seg > EPS) H2_over_I = H2_over_I + H_seg**2 / I_seg
 !         end do
 
-!         e1 = e1 + H2_over_I * w_g(j)
+!         e1 = e1 + H2_over_I * w_g(j) * 0.5d0 * (bp_max - bp_min)
 !     end do
 
-!     ! ====================== 5. 最终结果 ======================
 !     factor = (PI * 1.0d0**2) / (8.0d0 * sqrt(2.0d0))
-!     epsilon_eff = (e1 * e2 / (e3**2)) * factor * b0
+!     epsilon_eff = (e1 * e2 / (e3**2)) * factor * b0_ref
 
-!     ! 清理内存
-!     deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp, &
-!                x_g, w_g, min_idx)
+!     deallocate(B, gp, kg, ds_over_B, cum_dsB, cum_dsB_gp, x_g, w_g, min_idx)
 
 ! end subroutine effective_ripple_internal
 
@@ -1185,34 +1130,33 @@ end subroutine find_local_minima
 !=======================================================================
 ! 单弹跳段积分
 !=======================================================================
-subroutine integrate_bounce_segment(bp, i1, i2, B, gp, kg, dsB, Hout, Iout)
-    real(8), intent(in)  :: bp
-    integer, intent(in)  :: i1, i2
-    real(8), intent(in)  :: B(:), gp(:), kg(:), dsB(:)
+subroutine integrate_bounce_segment(bp, i1, i2, B, gp, kg, ds_over_B, b0_ref, Hout, Iout)
+    real(8), intent(in) :: bp, b0_ref
+    integer, intent(in) :: i1, i2
+    real(8), intent(in) :: B(:), gp(:), kg(:), ds_over_B(:)
     real(8), intent(out) :: Hout, Iout
 
     integer :: k
-    real(8) :: b_loc, termH, termI, sqrtH, sqrtI, b0
+    real(8) :: b_loc, sqrtH, sqrtI, termH, termI
 
-    b0 = maxval(B)
     Hout = 0.0d0
     Iout = 0.0d0
 
     do k = i1, i2-1
-        b_loc = B(k) / b0
+        b_loc = B(k) / b0_ref
         if (bp <= b_loc) cycle
 
-        sqrtH = sqrt(bp - b_loc)
-        sqrtI = sqrt(1.0d0 - b_loc / bp)
+        sqrtH = sqrt(max(0.0d0, bp - b_loc))
+        sqrtI = sqrt(max(0.0d0, 1.0d0 - b_loc/bp))
 
-        termH = (1.0d0/bp) * dsB(k) / B(k) * sqrtH * &
-                (4.0d0*b0/B(k) - 1.0d0/bp) * gp(k) * kg(k)
+        termH = (1.0d0/bp) * ds_over_B(k) * sqrtH * &
+                (4.0d0*b0_ref/B(k) - 1.0d0/bp) * gp(k) * kg(k)
 
-        termI = dsB(k) / B(k) * sqrtI
+        termI = ds_over_B(k) * sqrtI
 
         Hout = Hout + termH
         Iout = Iout + termI
     end do
-end subroutine integrate_bounce_segment
+end subroutine
     
 end module effective_ripple
