@@ -4,7 +4,6 @@ from scipy.optimize import root
 from scipy.integrate import simpson
 from importlib import import_module
 from .mgrid import MGrid
-from func_timeout import func_timeout, FunctionTimedOut
 
 try:
     # Prefer the f90wrap-generated high-level API.
