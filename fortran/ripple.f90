@@ -188,11 +188,11 @@ contains
     ! Output: epsilon_eff - effective ripple
     !         Bboundary - boundary magnetic field strength
     !============================================================================
-    subroutine compute_ripple(extcur, initial_rz, initial_gradpsi, &
+    subroutine compute_ripple(initial_rz, initial_gradpsi, &
                          epsilon_eff, Bboundary, fieldline_data, trace_istate)
       implicit none
       
-      real(8), intent(in) :: extcur(:)
+      ! real(8), intent(in) :: extcur(:)
       real(8), intent(in) :: initial_rz(2)
       real(8), intent(in) :: initial_gradpsi(3)
       real(8), intent(out) :: epsilon_eff
@@ -227,7 +227,7 @@ contains
       ! initial_rz_current = initial_rz
       ! initial_gradpsi_current = initial_gradpsi
       
-      call sum_bfield_internal(extcur)
+      ! call sum_bfield_internal(extcur)
       
       allocate(fieldline_local(npoints, 20))
       call trace_gradpsi_internal(fieldline_local, initial_rz, initial_gradpsi, trace_istate)
@@ -945,6 +945,132 @@ contains
       deallocate(h_i, h_j, i_j)
 
     end subroutine effective_ripple_internal
+
+!=======================================================================
+! pyneo-style η-state integration (matches rhs_bo1.f90 + flint_bo.f90)
+! Uses existing fieldline_data from LSODE trace.
+!=======================================================================
+    subroutine effective_ripple_pyneo(fieldline_data, geocur, R0, npart, epsilon_eff)
+      implicit none
+      real(8), intent(in)  :: fieldline_data(:, :)
+      real(8), intent(in)  :: geocur(:)
+      real(8), intent(in)  :: R0
+      integer, intent(in)  :: npart
+      real(8), intent(out) :: epsilon_eff
+
+      integer :: npts, i, k
+      real(8) :: bmax, bmin, b0, heta, eta_val, b_loc, subsq, sqrt_term
+      real(8) :: Bmag, grad_psi, kappa_g, ds_over_B, ds, dphi, r, Bphi
+      real(8) :: H_acc, I_acc, bigint_total
+      real(8) :: e2, e3
+      integer :: isw, iswst
+      real(8), allocatable :: ds_over_B_arr(:)
+
+      npts = size(fieldline_data, 1)
+
+      if (npts < 2) then
+        if (trace_verbose /= 0) write(*, '(A)') 'Error: Not enough data points'
+        epsilon_eff = 0.0d0
+        return
+      end if
+
+      ! --- B range ---
+      bmin = fieldline_data(1, 7)
+      bmax = fieldline_data(1, 7)
+      do i = 1, npts
+        if (fieldline_data(i, 7) > bmax) bmax = fieldline_data(i, 7)
+        if (fieldline_data(i, 7) < bmin) bmin = fieldline_data(i, 7)
+      end do
+      b0 = bmax
+
+      ! --- η values (pyneo convention: etamin + heta/2) ---
+      heta = (1.0d0 - bmin/b0) / real(npart - 1, 8)
+
+      ! --- dphi ---
+      dphi = 2.0d0 * PI / real(nphi_trace, 8)
+
+      ! --- denominator integrals e2, e3 and ds/B array ---
+      e2 = 0.0d0; e3 = 0.0d0
+      allocate(ds_over_B_arr(npts))
+      do i = 1, npts
+        r    = fieldline_data(i, 1)
+        Bphi = fieldline_data(i, 6)
+        Bmag = fieldline_data(i, 7)
+        grad_psi = fieldline_data(i, 11)
+        if (Bmag < 1.0d-15 .or. abs(Bphi) < 1.0d-15) then
+          ds_over_B_arr(i) = 0.0d0
+          cycle
+        end if
+        ds = r * Bmag / abs(Bphi) * dphi
+        ds_over_B = ds / Bmag
+        ds_over_B_arr(i) = ds_over_B
+        e2 = e2 + ds_over_B
+        e3 = e3 + ds_over_B * grad_psi
+      end do
+
+      if (e3 < 1.0d-15) then
+        epsilon_eff = 0.0d0
+        deallocate(ds_over_B_arr)
+        return
+      end if
+
+      ! --- η-state accumulation ---
+      bigint_total = 0.0d0
+
+      do k = 1, npart
+        eta_val = (bmin/b0) + heta/2.0d0 + real(k-1, 8) * heta
+
+        isw   = 0       ! 0=free, 1=in_well
+        iswst = 0       ! first-bounce sentinel (matches pyneo)
+        H_acc = 0.0d0
+        I_acc = 0.0d0
+
+        do i = 1, npts
+          Bmag = fieldline_data(i, 7)
+          if (Bmag < 1.0d-15) cycle
+
+          b_loc  = Bmag / b0
+          subsq  = 1.0d0 - b_loc / eta_val
+
+          if (subsq > 0.0d0) then
+            ! --- INSIDE WELL ---
+            isw = 1
+            sqrt_term = sqrt(subsq)
+            ds_over_B = ds_over_B_arr(i)
+            grad_psi  = fieldline_data(i, 11)
+            kappa_g   = geocur(i)
+
+            I_acc = I_acc + ds_over_B * sqrt_term
+            H_acc = H_acc + (1.0d0/eta_val) * ds_over_B * sqrt(eta_val - b_loc) &
+                    * (4.0d0/b_loc - 1.0d0/eta_val) * grad_psi * kappa_g
+
+          else
+            ! --- OUTSIDE WELL ---
+            if (isw == 1) then
+              ! Just exited a well → settle
+              if (I_acc > 1.0d-15) then
+                bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
+              end if
+              iswst = 1
+              H_acc = 0.0d0; I_acc = 0.0d0
+              isw = 0
+            end if
+          end if
+        end do
+
+        ! Handle particle still in well at end of trace
+        if (isw == 1 .and. I_acc > 1.0d-15) then
+          bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
+        end if
+      end do
+
+      ! --- final formula (matching pyneo convention) ---
+      epsilon_eff = (PI * R0**2 * heta / (8.0d0 * sqrt(2.0d0))) &
+                    * bigint_total * e2 / e3**2
+
+      deallocate(ds_over_B_arr)
+
+    end subroutine effective_ripple_pyneo
 
 
 !=======================================================================
