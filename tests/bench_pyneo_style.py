@@ -12,7 +12,7 @@ from ripplepy import (
 from ripplepy.ripple import compute_epstot_pyneo
 
 def run_benchmark(name, vmec_path, mgrid_path, initial_rz, extcur, nfp,
-                  sur_idx, nturn, nphi, npart, full_torus=False):
+                  sur_idx, nturn, nphi, npart, full_torus=False,py_old = False):
     print(f"\n{'='*60}")
     print(f"  {name}")
     print(f"{'='*60}")
@@ -45,54 +45,72 @@ def run_benchmark(name, vmec_path, mgrid_path, initial_rz, extcur, nfp,
     ctx.setup_grids(); ctx.run_all()
     py_eps = ctx.epstot_profile()
     
-    # ── ripplepy (old) ──
-    print("  Running ripplepy (old bp-scan)...")
+    print("  Running ripplepy ...")
     initialize_mgrid_field(mgrid_path, nfp, full_torus=full_torus)
     set_extcur(extcur)
     axis_rz, R0_rp, axis_fl, ist = find_axis(initial_rz, xtol=1e-5, max_iter=100)
     print(f"  Axis: R={axis_rz[0]:.4f}, R0={R0_rp:.4f}")
     
     print(f'major radius from vmec: {R0_vmec:.4f}, from ripplepy: {R0_rp:.4f}')
-
-    rp_old = []
-    for rz in RZ_points:
-        fld = np.zeros((nturn*nphi, 20), dtype=np.float64, order='F')
-        eps, Bb, ist = compute_epstot(R0_vmec, rz,
-                                       np.array([1,0,0], dtype=np.float64), fld)
-        rp_old.append(eps)
-    
-    # ── ripplepy (new pyneo-style) ──
     print("  Running ripplepy (new pyneo-style)...")
     rp_new = []
     for rz in RZ_points:
         eps, ist = compute_epstot_pyneo(
-            R0_vmec, rz,
+            R0_rp, rz,
             initial_gradpsi=np.array([1,0,0], dtype=np.float64),
             npart=npart, nturn=nturn, nphi=nphi, verbose=False,
         )
         rp_new.append(eps if eps is not None else np.nan)
     
-    # ── Print ──
-    print(f"\n  {'s':>6s}  {'pyneo':>12s}  {'rp_old':>12s}  {'old/py':>8s}  "
-          f"{'rp_new':>12s}  {'new/py':>8s}")
-    print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8}  {'-'*12}  {'-'*8}")
-    for i in range(len(sur_idx)):
-        o = rp_old[i] / py_eps[i] if py_eps[i] != 0 else np.nan
-        n = rp_new[i] / py_eps[i] if py_eps[i] != 0 else np.nan
-        print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  {rp_old[i]:12.4e}  {o:8.4f}  "
-              f"{rp_new[i]:12.4e}  {n:8.4f}")
-    # plot
-    from matplotlib import pyplot as plt
-    plt.figure(figsize=(8,6))
-    plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
-    plt.plot(sur_idx, rp_old, 's-', label='ripplepy (old)')
-    plt.plot(sur_idx, rp_new, 'x-', label='ripplepy (new pyneo-style)')
-    plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
-    plt.title(f"{name} Benchmark: eps_tot vs s")
-    plt.tight_layout(); plt.show()
+    # ── ripplepy (old) ──
+    if py_old:
 
-    
-    return py_eps, rp_old, rp_new
+        rp_old = []
+        for rz in RZ_points:
+            fld = np.zeros((nturn*nphi, 20), dtype=np.float64, order='F')
+            eps, Bb, ist = compute_epstot(R0_rp, rz,
+                                        np.array([1,0,0], dtype=np.float64), fld)
+            rp_old.append(eps)
+        print(f"\n  {'s':>6s}  {'pyneo':>12s} {'py_old':>12s} {'old/py':>8s}"
+            f"{'rp_new':>12s}  {'new/py':>8s}")
+        print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8} {'-'*12}  {'-'*8}")
+        for i in range(len(sur_idx)):
+            n = rp_new[i] / py_eps[i] if py_eps[i] != 0 else np.nan
+            o = rp_old[i] / py_eps[i] if py_eps[i] != 0 else np.nan
+            print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  {rp_old[i]:12.4e}  {o:8.4f}"
+                f"{rp_new[i]:12.4e}  {n:8.4f}")        
+        from matplotlib import pyplot as plt
+        plt.figure(figsize=(8,6))
+        plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
+        plt.plot(sur_idx, rp_old, 'x-', label='ripplepy(old)')
+        plt.plot(sur_idx, rp_new, 'x-', label='ripplepy (new pyneo-style)')
+        plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
+        plt.title(f"{name} Benchmark: eps_tot vs s")
+        plt.tight_layout(); plt.show()
+
+        
+        return py_eps,rp_old, rp_new        
+    # ── ripplepy (new pyneo-style) ──
+
+    else:
+        print(f"\n  {'s':>6s}  {'pyneo':>12s}  "
+            f"{'rp_new':>12s}  {'new/py':>8s}")
+        print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8}")
+        for i in range(len(sur_idx)):
+            n = rp_new[i] / py_eps[i] if py_eps[i] != 0 else np.nan
+            print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  "
+                f"{rp_new[i]:12.4e}  {n:8.4f}")        
+    # plot
+        from matplotlib import pyplot as plt
+        plt.figure(figsize=(8,6))
+        plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
+        plt.plot(sur_idx, rp_new, 'x-', label='ripplepy (new pyneo-style)')
+        plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
+        plt.title(f"{name} Benchmark: eps_tot vs s")
+        plt.tight_layout(); plt.show()
+
+        
+        return py_eps, rp_new
 
 # ═══════════════════════════════════════════════════════════════
 # NCSX
@@ -105,14 +123,14 @@ run_benchmark(
     f"{BASE}/tests/test_file/mgrid_c09r00.nc",
     (1.57, 0), None, 3,
     np.linspace(0.1, 0.2, 11),
-    nturn=64, nphi=180, npart=50,
+    nturn=200, nphi=180, npart=50,
     full_torus=False,
 )
 
 # ═══════════════════════════════════════════════════════════════
 # CFQS
 # ═══════════════════════════════════════════════════════════════
-BASE = "/Users/zkgao/ripplepy"
+# BASE = "/Users/zkgao/ripplepy"
 
 run_benchmark(
     "CFQS",
@@ -124,16 +142,15 @@ run_benchmark(
     full_torus=False,
 )
 
-# ═══════════════════════════════════════════════════════════════
-# H1
-# ═══════════════════════════════════════════════════════════════
-# run_benchmark(
-#     "H1",
-#     f"{BASE}/tests/test_file/wout_h1_design.nc",
-#     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
-#     (1.26, 0), [50000, 5000, 1, -80000, -40000], 3,
-#     np.linspace(0.1, 1, 11),
-#     nturn=200, nphi=360, npart=50,
-#     full_torus=False,
-# )
-
+# # ═══════════════════════════════════════════════════════════════
+# # H1
+# # ═══════════════════════════════════════════════════════════════
+run_benchmark(
+    "H1",
+    f"{BASE}/tests/test_file/wout_h1_design.nc",
+    f"{BASE}/tests/test_file/mgrid_h1_design.nc",
+    (1.26, 0), [50000, 5000, 1, -80000, -40000], 3,
+    np.linspace(0.1, 1, 11),
+    nturn=200, nphi=360, npart=50,
+    full_torus=False,
+)

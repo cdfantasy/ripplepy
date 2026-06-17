@@ -48,12 +48,26 @@ def get_trace_verbose():
     return int(Effective_Ripple.get_trace_verbose())
 
 def initialize_mgrid_field(mgrid_filename, nfp, full_torus=True):
-    """Initialize the Fortran backend with an mgrid file and return the loaded grid."""
+                        #    ,filter_modes=None, filter_nphi_new=None):
+    """Initialize the Fortran backend with an mgrid file and return the loaded grid.
+
+    Parameters
+    ----------
+    filter_modes : int, optional
+        If set, apply Fourier filter in φ direction keeping this many modes.
+    filter_nphi_new : int, optional
+        Output φ grid size after filtering (default: same as input).
+    """
     if Effective_Ripple is None:
         raise ImportError("Effective_Ripple was not imported successfully.")
 
     mgrid = MGrid.from_file(mgrid_filename)
     print(f"✓ Loaded mgrid from '{mgrid_filename}' with shape (nr={mgrid.nr}, nz={mgrid.nz}, nphi={mgrid.nphi})")
+
+    # if filter_modes is not None:
+    #     mgrid.fourier_filter_phi(n_modes=filter_modes, nphi_new=filter_nphi_new)
+    #     print(f"✓ Fourier filtered: {filter_modes} modes, nphi={mgrid.nphi}")
+
     mgrid.expand_to_full_torus(nfp=nfp, full_torus=full_torus)
 
     phimin = 0.0
