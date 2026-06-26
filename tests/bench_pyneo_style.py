@@ -112,25 +112,26 @@ def run_benchmark(name, vmec_path, mgrid_path, initial_rz, extcur, nfp,
         
         return py_eps, rp_new
 
+
+BASE = "/Users/zkgao/ripplepy"
+
 # ═══════════════════════════════════════════════════════════════
 # NCSX
 # ═══════════════════════════════════════════════════════════════
-BASE = "/Users/zkgao/ripplepy"
-
-run_benchmark(
-    "NCSX",
-    f"{BASE}/tests/test_file/wout_ncsx_c09r00_free.nc",
-    f"{BASE}/tests/test_file/mgrid_c09r00.nc",
-    (1.57, 0), None, 3,
-    np.linspace(0.1, 0.2, 11),
-    nturn=200, nphi=180, npart=50,
-    full_torus=False,
-)
+# run_benchmark(
+#     "NCSX",
+#     f"{BASE}/tests/test_file/wout_ncsx_c09r00_free.nc",
+#     f"{BASE}/tests/test_file/mgrid_c09r00.nc",
+#     (1.57, 0), None, 3,
+#     np.linspace(0.1, 0.2, 11),
+#     nturn=200, nphi=180, npart=50,
+#     full_torus=False,
+# )
 
 # ═══════════════════════════════════════════════════════════════
 # CFQS
 # ═══════════════════════════════════════════════════════════════
-# BASE = "/Users/zkgao/ripplepy"
+
 
 run_benchmark(
     "CFQS",
@@ -138,7 +139,7 @@ run_benchmark(
     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
     (1.21, 0), None, 2,
     np.linspace(0.1, 1, 11),
-    nturn=200, nphi=360, npart=50,
+    nturn=200, nphi=360, npart=5000,
     full_torus=False,
 )
 
@@ -151,6 +152,6 @@ run_benchmark(
     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
     (1.26, 0), [50000, 5000, 1, -80000, -40000], 3,
     np.linspace(0.1, 1, 11),
-    nturn=200, nphi=360, npart=50,
+    nturn=200, nphi=360, npart=5000,
     full_torus=False,
 )

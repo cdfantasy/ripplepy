@@ -961,9 +961,10 @@ contains
       integer :: npts, i, k
       real(8) :: bmax, bmin, b0, heta, eta_val, b_loc, subsq, sqrt_term
       real(8) :: Bmag, grad_psi, kappa_g, ds_over_B, ds, dphi, r, Bphi
-      real(8) :: H_acc, I_acc, bigint_total
+      real(8) :: H_acc, I_acc, bigint_total, prev_I, prev_H, cur_I, cur_H
       real(8) :: e2, e3
       integer :: isw, iswst
+      logical :: prev_inside
       real(8), allocatable :: ds_over_B_arr(:)
 
       npts = size(fieldline_data, 1)
@@ -1020,10 +1021,13 @@ contains
       do k = 1, npart
         eta_val = (bmin/b0) + heta/2.0d0 + real(k-1, 8) * heta
 
-        isw   = 0       ! 0=free, 1=in_well
-        iswst = 0       ! first-bounce sentinel (matches pyneo)
-        H_acc = 0.0d0
-        I_acc = 0.0d0
+        isw    = 0       ! 0=free, 1=in_well
+        iswst  = 0       ! first-bounce sentinel (matches pyneo)
+        H_acc  = 0.0d0
+        I_acc  = 0.0d0
+        prev_inside = .false.
+        prev_I = 0.0d0
+        prev_H = 0.0d0
 
         do i = 1, npts
           Bmag = fieldline_data(i, 7)
@@ -1040,13 +1044,30 @@ contains
             grad_psi  = fieldline_data(i, 11)
             kappa_g   = geocur(i)
 
-            I_acc = I_acc + ds_over_B * sqrt_term
-            H_acc = H_acc + (1.0d0/eta_val) * ds_over_B * sqrt(eta_val - b_loc) &
+            cur_I = ds_over_B * sqrt_term
+            cur_H = (1.0d0/eta_val) * ds_over_B * sqrt(eta_val - b_loc) &
                     * (4.0d0/b_loc - 1.0d0/eta_val) * grad_psi * kappa_g
+
+            if (prev_inside) then
+              ! Trapezoidal rule: 0.5 * (f_{k-1} + f_k)
+              I_acc = I_acc + 0.5d0 * (prev_I + cur_I)
+              H_acc = H_acc + 0.5d0 * (prev_H + cur_H)
+            else
+              ! First point entering well: half-trapezoid from boundary (0)
+              I_acc = I_acc + 0.5d0 * cur_I
+              H_acc = H_acc + 0.5d0 * cur_H
+            end if
+
+            prev_inside = .true.
+            prev_I = cur_I
+            prev_H = cur_H
 
           else
             ! --- OUTSIDE WELL ---
             if (isw == 1) then
+              ! Closing half-trapezoid from last interior point to boundary (0)
+              I_acc = I_acc + 0.5d0 * prev_I
+              H_acc = H_acc + 0.5d0 * prev_H
               ! Just exited a well → settle
               if (I_acc > 1.0d-15) then
                 bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
@@ -1055,12 +1076,20 @@ contains
               H_acc = 0.0d0; I_acc = 0.0d0
               isw = 0
             end if
+            prev_inside = .false.
+            prev_I = 0.0d0
+            prev_H = 0.0d0
           end if
         end do
 
         ! Handle particle still in well at end of trace
-        if (isw == 1 .and. I_acc > 1.0d-15) then
-          bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
+        if (isw == 1) then
+          ! Closing half-trapezoid at end of trace
+          I_acc = I_acc + 0.5d0 * prev_I
+          H_acc = H_acc + 0.5d0 * prev_H
+          if (I_acc > 1.0d-15) then
+            bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
+          end if
         end if
       end do
 
