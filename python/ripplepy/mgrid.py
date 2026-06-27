@@ -379,55 +379,6 @@ class MGrid():
         
         return self
     
-    # def fourier_filter_phi(self, n_modes: int = None, nphi_new: int = None):
-    #     '''
-    #     Fourier low-pass filter in the toroidal (φ) direction.
-
-    #     Operates on per-coil-group arrays. Makes data periodic by appending
-    #     the first φ-slice as a closing point, then FFT → truncate → iFFT.
-    #     No stellarator symmetry needed — pure periodic FFT.
-
-    #     Args:
-    #         n_modes: Fourier modes to keep (default: nphi//3).
-    #         nphi_new: Output φ grid size (default: same as input).
-
-    #     Returns:
-    #         self (for method chaining)
-    #     '''
-    #     import numpy as np
-    #     nphi_in = self.nphi
-    #     if n_modes is None:
-    #         n_modes = max(1, nphi_in // 3)
-    #     if nphi_new is None:
-    #         nphi_new = nphi_in
-
-    #     def _filter_one(arr):
-    #         """arr: (ncoils, nphi, nz, nr) → (ncoils, nphi_new, nz, nr)"""
-    #         ncoils, _, nz, nr = arr.shape
-    #         # Make periodic: append first φ-slice → (ncoils, nphi+1, nz, nr)
-    #         per = np.concatenate([arr, arr[:, 0:1, :, :]], axis=1)
-    #         # Flatten → (ncoils, nphi+1, nz*nr) → FFT along axis=1
-    #         flat = per.reshape(ncoils, nphi_in + 1, nz * nr)
-    #         spec = np.fft.rfft(flat, axis=1)
-    #         n_keep = min(n_modes, spec.shape[1])
-    #         spec[:, n_keep:, :] = 0.0
-    #         # iFFT → (ncoils, nphi_new+1, nz*nr), drop closing
-    #         result_flat = np.fft.irfft(spec, n=nphi_new + 1, axis=1)
-    #         result = result_flat[:, :nphi_new, :].reshape(ncoils, nphi_new, nz, nr)
-    #         return np.ascontiguousarray(result)
-
-    #     for attr in ['br_arr', 'bp_arr', 'bz_arr']:
-    #         if hasattr(self, attr) and len(getattr(self, attr, [])) > 0:
-    #             setattr(self, attr, _filter_one(getattr(self, attr)))
-
-    #     self.nphi = nphi_new
-    #     # Update summed fields
-    #     if hasattr(self, 'br_arr') and len(self.br_arr) > 0:
-    #         self.br = np.sum(self.br_arr, axis=0)
-    #         self.bp = np.sum(self.bp_arr, axis=0)
-    #         self.bz = np.sum(self.bz_arr, axis=0)
-    #         self.bvec = np.transpose([self.br, self.bp, self.bz])
-    #     return self
 
     def expand_to_full_torus(self, nfp: int = None, full_torus: bool = True):
         '''
