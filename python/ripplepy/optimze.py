@@ -20,7 +20,7 @@ def objective_function(extcur_free,extcur_fixed,Generation,Individual, initial_r
         RZ = np.array([axis_rz[0]+delt_r, axis_rz[1]], dtype=np.float64, order='F')
         initial_gradpsi = compute_initial_gradpsi_nemov(extcur, RZ[0],RZ[1],verbose=True)
         set_trace_parameters(nturn, nphi, verbose=False)
-        epsilon_eff, bboundary ,fieldline_data,trace_istate= compute_epstot(R0, extcur, RZ, initial_gradpsi, fieldline_data, return_fieldline=True)
+        epsilon_eff, bboundary ,fieldline_data,trace_istate= compute_epstot(R0, initial_rz, initial_gradpsi=initial_gradpsi, npart=100, nturn=nturn, nphi=nphi, return_fieldline=True, verbose=True)
         if trace_istate == 0:
             vol,Am,iota = calculate_plasma_params(fieldline_data, axis_fieldline, nturn, nphi, R0)
             print(f"✓ Plasma parameters calculated: Volume={vol:.3f}, Major radius={Am:.3f}, iota={iota:.3f}")

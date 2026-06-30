@@ -18,7 +18,7 @@ from simsopt.geo import SurfaceRZFourier
 import neo
 from neo import NeoContext, neo_surfaces_from_simsopt_boozer
 from ripplepy import initialize_mgrid_field, set_extcur, set_trace_parameters
-from ripplepy.ripple import compute_epstot_pyneo
+from ripplepy.ripple import compute_epstot
 from ripplepy.boozer_eps_verify import (_boozer_obj_to_dict, eps_eff_pyneo_style,
     _fourier_sum_cos, _fourier_sum_sin)
 
@@ -98,7 +98,7 @@ def run_benchmark(name, vmec_path, mgrid_path, extcur, nfp,
     rp_mgrid = []
     t0 = time.time()
     for s, rz in zip(sur_idx, RZ_points):
-        eps, ist = compute_epstot_pyneo(
+        eps, bnd, ist = compute_epstot(
             R0_vmec, rz,
             initial_gradpsi=np.array([1, 0, 0], dtype=np.float64),
             npart=npart, nturn=nturn, nphi=nphi, verbose=False,

@@ -38,6 +38,7 @@ fortran/*.mod
 fortran/pspline/*.mod
 
 # test
+tests/h1_optimisation/
 
 mgrid*
 log_xgrid*
@@ -54,3 +55,4 @@ pyNEO - 帮我梳理一下该代码是如何计算epst….md
 .reasonix/desktop-topic-title-sources.json
 .gitignore
 .png
+.reasonix/

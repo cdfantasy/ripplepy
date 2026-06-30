@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Benchmark: ripplepy (old bp-scan) vs ripplepy (new pyneo-style) vs pyneo for H1 and NCSX."""
+"""Benchmark: ripplepy vs pyneo for CFQS and H1."""
 import numpy as np, time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from simsopt.mhd import Boozer, Vmec
 from simsopt.geo import SurfaceRZFourier
 import neo
@@ -9,9 +10,8 @@ from ripplepy import (
     set_extcur, initialize_mgrid_field, set_trace_parameters,
     compute_epstot, find_axis,
 )
-from ripplepy.ripple import compute_epstot_pyneo
 
-def run_benchmark(name, vmec_path, mgrid_path, initial_rz, extcur, nfp,
+def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, nfp,
                   sur_idx, nturn, nphi, npart, full_torus=False,py_old = False):
     print(f"\n{'='*60}")
     print(f"  {name}")
@@ -27,14 +27,24 @@ def run_benchmark(name, vmec_path, mgrid_path, initial_rz, extcur, nfp,
         rpz = surf.cross_section(phi=0)[0]
         RZ_points.append(rpz[[0, 2]])
     RZ_points = np.asarray(RZ_points)
-    
-    # ── pyneo ──
+
     print("  Running pyneo...")
+
     boozer = Boozer(vmec)
     boozer.mpol = 72; boozer.ntor = 36
-    boozer.register(sur_idx); boozer.run()
+    try:
+        boozer.bx.read_boozmn(str(boozer_path))
+        boozer.register(sur_idx)
+        print("  Loaded Boozer from cached boozmn netcdf.")
+    except Exception:
+        boozer.register(sur_idx); boozer.run()
+        boozer.bx.write_boozmn(str(boozer_path))
+        print("  Computed Boozer transform and cached to boozmn netcdf.")
+
     neoclass = neo.from_simsopt_boozer(boozer)
-    ctx = NeoContext(); ctx.set_boozer(neoclass)
+
+    ctx = NeoContext(); 
+    ctx.set_boozer(neoclass)
     ctx.set_flux_surfaces(neo_surfaces_from_simsopt_boozer(boozer).tolist())
     ctx.set_resolution(theta_n=100, phi_n=100)
     ctx.set_transport_options(npart=npart, multra=1, acc_req=0.01, no_bins=100,
@@ -52,15 +62,25 @@ def run_benchmark(name, vmec_path, mgrid_path, initial_rz, extcur, nfp,
     print(f"  Axis: R={axis_rz[0]:.4f}, R0={R0_rp:.4f}")
     
     print(f'major radius from vmec: {R0_vmec:.4f}, from ripplepy: {R0_rp:.4f}')
-    print("  Running ripplepy (new pyneo-style)...")
+    print("  Running ripplepy ...")
+    set_trace_parameters(nturn, nphi, verbose=False)
     rp_new = []
-    for rz in RZ_points:
-        eps, ist = compute_epstot_pyneo(
+    
+    def _compute_one(rz):
+        eps, bnd, ist = compute_epstot(
             R0_rp, rz,
             initial_gradpsi=np.array([1,0,0], dtype=np.float64),
             npart=npart, nturn=nturn, nphi=nphi, verbose=False,
         )
-        rp_new.append(eps if eps is not None else np.nan)
+        return eps if eps is not None else np.nan
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futures = {ex.submit(_compute_one, rz): i for i, rz in enumerate(RZ_points)}
+        results = [np.nan] * len(RZ_points)
+        for fut in as_completed(futures):
+            i = futures[fut]
+            results[i] = fut.result()
+    rp_new = results
     
     # ── ripplepy (old) ──
     if py_old:
@@ -133,15 +153,16 @@ BASE = "/Users/zkgao/ripplepy"
 # ═══════════════════════════════════════════════════════════════
 
 
-run_benchmark(
-    "CFQS",
-    f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
-    f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
-    (1.21, 0), None, 2,
-    np.linspace(0.1, 1, 11),
-    nturn=200, nphi=360, npart=5000,
-    full_torus=False,
-)
+# run_benchmark(
+#     "CFQS",
+#     f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
+#     f"{BASE}/tests/test_file/cfqs_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
+#     (1.21, 0), None, 2,
+#     np.linspace(0.1, 1, 11),
+#     nturn=200, nphi=360, npart=5000,
+#     full_torus=False,
+# )
 
 # # ═══════════════════════════════════════════════════════════════
 # # H1
@@ -149,8 +170,9 @@ run_benchmark(
 run_benchmark(
     "H1",
     f"{BASE}/tests/test_file/wout_h1_design.nc",
+    f"{BASE}/tests/test_file/h1_boozmn.nc",
     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
-    (1.26, 0), [50000, 5000, 1, -80000, -40000], 3,
+    (1.26, 0), [50000, 5000, 2000, -80000, -40000], 3,
     np.linspace(0.1, 1, 11),
     nturn=200, nphi=360, npart=5000,
     full_torus=False,

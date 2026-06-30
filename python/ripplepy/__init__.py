@@ -24,13 +24,12 @@ from .ripple import (
     set_trace_verbose,
     get_trace_verbose,
 )
-# from .optimize import (
-#     ObjectiveFunction,
-#     OptimizationConfig,
-#     differential_evolution,
-#     mutate_de,
-#     crossover_de,
-# )
+from .optimize import (
+    OptimizationConfig,
+    StellaratorObjective,
+    DifferentialEvolution,
+    run as run_optimization,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -45,11 +44,10 @@ __all__ = [
     "find_axis",
     "set_trace_parameters",
     "calculate_plasma_params",
-    # "ObjectiveFunction",
-    # "OptimizationConfig",
-    # "differential_evolution",
-    # "mutate_de",
-    # "crossover_de",
+    "OptimizationConfig",
+    "StellaratorObjective",
+    "DifferentialEvolution",
+    "run_optimization",
     "set_trace_verbose",
     "get_trace_verbose",
 ]

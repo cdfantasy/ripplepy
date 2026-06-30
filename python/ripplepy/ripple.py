@@ -102,8 +102,8 @@ def set_extcur(extcur):
             raise ValueError("Field not initialized. Call initialize_mgrid_field(...) before set_extcur(None).")
         extcur = np.ones(_CURRENT_N_EXT_CUR, dtype=np.float64)
         print(f"✓ No extcur provided; using raw.")
-    else:
-        print(f"✓ Setting extcur: {extcur}")
+    # else:
+        # print(f"✓ Setting extcur: {extcur}")
     extcur_array = np.asarray(extcur, dtype=np.float64)
     Effective_Ripple.sum_bfield_internal(extcur_array)
     return extcur_array
@@ -176,115 +176,12 @@ def trace_fieldline(initial_rz=None, initial_gradpsi=None,nturn=400, nphi=360, e
         print(f"✗ Field line tracing failed with istate={trace_istate}")
     return fieldline_data, trace_istate
 
+
+
 def compute_epstot(R0, initial_rz, initial_gradpsi=None,
-                   fieldline_data=None, return_fieldline=False):
+                         npart=100, nturn=200, nphi=360, return_fieldline=False, verbose=True):
     """
-    Compute total effective ripple (epsilon_eff) and boundary B field.
-    
-    This is a high-level wrapper around Effective_Ripple.compute_ripple that 
-    handles input conversion and data transfer.
-    
-    Parameters
-    ----------
-    R0 : float
-        Major radius.
-    # extcur : array_like, shape (n_ext_cur,)
-    #     External coil currents.
-    initial_rz : array_like, shape (2,)
-        Initial position (R, Z) on the field line.
-    initial_gradpsi : array_like, shape (3,), optional
-        Initial Nemov gradient-psi vector [P, G, Q]. If None, defaults to [1, 0, 0].
-    fieldline_data : ndarray, optional
-        Preallocated Fortran-contiguous array with shape (npoints, 20). If not
-        provided and return_fieldline=True, a buffer is allocated using the
-        current Fortran backend trace settings.
-    return_fieldline : bool, optional
-        If True, also return the traced field line data (default: False).
-    
-    Returns
-    -------
-    epsilon_eff : float
-        Total effective ripple.
-    bboundary : float
-        Boundary magnetic field strength.
-    fieldline_data : ndarray, shape (nturn*nphi, 20), optional
-        Traced field line data if return_fieldline=True. Columns:
-        [R, Z, phi, Br, Bz, Bphi, |B|, |grad_psi|, ..., derivatives]
-    
-    Examples
-    --------
-    >>> eps_eff, b_bound = compute_epstot(
-    ...     initial_rz=np.array([1.5, 0.0])
-    ... )
-    
-    >>> eps_eff, b_bound, fline = compute_epstot(
-    ...     initial_rz=[1.5, 0.0],
-    ...     initial_gradpsi=[1.0, 0.0, 0.0],
-    ...     fieldline_data=fieldline_data,
-    ...     return_fieldline=True
-    ... )
-    """
-    if Effective_Ripple is None:
-        raise ImportError("Effective_Ripple was not imported successfully.")
-    
-    # Prepare inputs
-    # extcur_array = np.asarray(extcur, dtype=np.float64)
-    initial_rz_array = np.asarray(initial_rz, dtype=np.float64)
-    
-    if initial_rz_array.shape != (2,):
-        raise ValueError("initial_rz must contain exactly two values: (R, Z)")
-    
-    if initial_gradpsi is None:
-        initial_gradpsi_array = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-    else:
-        initial_gradpsi_array = np.asarray(initial_gradpsi, dtype=np.float64)
-        if initial_gradpsi_array.shape != (3,):
-            raise ValueError("initial_gradpsi must contain exactly three values [P, G, Q]")
-    
-    if fieldline_data is None:
-        npoints = int(getattr(Effective_Ripple, "npoints", 0))
-        if npoints <= 0:
-            raise ValueError(
-                "fieldline_data was not provided and the Fortran backend trace "
-                "parameters are not set. Call set_trace_parameters(...) first or "
-                "pass a preallocated fieldline_data array."
-            )
-        fieldline_data = np.zeros((npoints, 20), dtype=np.float64, order='F')
-    else:
-        fieldline_data = np.asarray(fieldline_data, dtype=np.float64)
-        if fieldline_data.ndim != 2 or fieldline_data.shape[1] != 20:
-            raise ValueError("fieldline_data must have shape (npoints, 20)")
-        if not fieldline_data.flags.f_contiguous:
-            fieldline_data = np.asfortranarray(fieldline_data)
-    
-    # Call the Fortran compute_ripple
-    epsilon_eff, bboundary, trace_istate = Effective_Ripple.compute_ripple(
-        initial_rz_array, 
-        initial_gradpsi_array,
-        fieldline_data
-    )
-    if trace_istate != 0:
-        epsilon_eff = None
-        bboundary = None
-        print(f"✗ compute_ripple failed with istate={trace_istate}")
-    else:
-        epsilon_eff = epsilon_eff*R0**2  
-        print(f"✓ Effective ripple computed: ε_eff={epsilon_eff:.6e}, B_boundary={bboundary:.6f} T")
-    
-    if return_fieldline:
-        return epsilon_eff, bboundary, fieldline_data,trace_istate
-    else:
-        return epsilon_eff, bboundary,trace_istate
-
-
-def compute_epstot_pyneo(R0, initial_rz, initial_gradpsi=None,
-                         npart=100, nturn=200, nphi=360, verbose=True):
-    """
-    Compute ε_eff^(3/2) using pyneo's η-particle state machine integration.
-    
-    Uses the same field-line tracing as compute_epstot, but replaces the
-    bp-scan integration with pyneo's exact algorithm (subsq + isw state
-    machine matching rhs_bo1.f90 + flint_bo.f90).
+    Compute ε_eff^(3/2) using η-particle state machine integration.
     
     Parameters
     ----------
@@ -300,6 +197,8 @@ def compute_epstot_pyneo(R0, initial_rz, initial_gradpsi=None,
         Number of toroidal turns to trace.
     nphi : int
         Points per turn.
+    return_fieldline : bool
+        If True, also return the traced field line data.
     verbose : bool
         Print progress.
     
@@ -307,6 +206,12 @@ def compute_epstot_pyneo(R0, initial_rz, initial_gradpsi=None,
     -------
     epsilon_eff : float or None
         ε_eff^(3/2), or None if tracing failed.
+    bboundary : float
+        Boundary |B| value.
+    fieldline_data : ndarray, optional
+        Traced field line data if return_fieldline=True.
+    trace_istate : int
+        Status code (0 = success).
     """
     if Effective_Ripple is None:
         raise ImportError("Effective_Ripple was not imported successfully.")
@@ -318,9 +223,8 @@ def compute_epstot_pyneo(R0, initial_rz, initial_gradpsi=None,
     else:
         initial_gradpsi_array = np.asarray(initial_gradpsi, dtype=np.float64)
     
-    # Set extcur and trace field line
-    # set_extcur(extcur_array)
-    set_trace_parameters(nturn, nphi, verbose=False)
+    # NOTE: set_trace_parameters must be called once before looping over
+    # multiple compute_epstot calls, to allow thread-safe parallelism.
     
     npoints_val = nturn * nphi
     fieldline_data = np.zeros((npoints_val, 20), dtype=np.float64, order='F')
@@ -335,22 +239,26 @@ def compute_epstot_pyneo(R0, initial_rz, initial_gradpsi=None,
     if trace_istate != 0:
         if verbose:
             print(f"✗ Field line tracing failed with istate={trace_istate}")
-        return None, trace_istate
+        if return_fieldline:
+            return None, 0.0, np.zeros((0, 20)), trace_istate
+        return None, 0.0, trace_istate
     
     # Compute geodesic curvature
     geocur = np.zeros(npoints_val, dtype=np.float64, order='F')
     Bboundary = np.zeros(1, dtype=np.float64, order='F')
     Effective_Ripple.geodesic_curvature_internal(fieldline_data, geocur, Bboundary)
     
-    # Call the new pyneo-style integration
+    # Call the η-state integration
     epsilon_eff = Effective_Ripple.effective_ripple_pyneo(
         fieldline_data, geocur, float(R0), int(npart)
     )
     
     if verbose:
-        print(f"✓ ε_eff^(3/2) (pyneo-style) = {epsilon_eff:.6e}")
-    
-    return epsilon_eff, trace_istate
+        print(f"✓ ε_eff^(3/2) = {epsilon_eff:.6e}")
+    if return_fieldline:
+        return epsilon_eff, Bboundary, fieldline_data, trace_istate
+    else:
+        return epsilon_eff, Bboundary, trace_istate
 
 
 def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm):
