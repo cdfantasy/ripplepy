@@ -55,6 +55,8 @@ install(
     ${PY_PACKAGE_DIR}/__init__.py
     ${PY_PACKAGE_DIR}/mgrid.py
     ${PY_PACKAGE_DIR}/ripple.py
+    ${PY_PACKAGE_DIR}/optimize.py
+    ${PY_PACKAGE_DIR}/boozer_eps_verify.py
     DESTINATION ripplepy
 )
 
