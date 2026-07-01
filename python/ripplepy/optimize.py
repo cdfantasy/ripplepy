@@ -114,9 +114,8 @@ class OptimizationConfig:
     initial_rz : tuple[float, float]
         Starting (R, Z) guess for the magnetic axis search.
     initial_bounds : ndarray, shape (n_coils, 2)
-        Lower/upper bounds for every coil current.  Set lo == hi to fix a
-        coil in place.  At least one coil must be fixed (degree of freedom =
-        n - 1), so at least one row must have lo == hi.
+        [nominal, fraction] for each coil.  fraction=0 locks the coil;
+        fraction>0 gives [nominal×(1-f), nominal×(1+f)].
     full_torus : bool
         Whether to expand the mgrid to full torus (2π).
     nturn : int
@@ -194,21 +193,31 @@ class OptimizationConfig:
         if self.restart_best is not None:
             self.restart_best = np.asarray(self.restart_best, dtype=np.float64)
 
-        # ── Degrees‑of‑freedom check ──────────────────────────────────────
-        # The DE individual is a full extcur vector.  At least one coil must
-        # be fixed (lo == hi) so the degree of freedom is n-1.
-        bounds = self.initial_bounds
-        n_coils = len(bounds)
-        n_fixed = int(np.sum(bounds[:, 0] == bounds[:, 1]))
+        # ── Convert relative bounds [nominal, fraction] → absolute [lo, hi] ─
+        #   fraction = 0  → locked at nominal (lo == hi)
+        #   fraction > 0  → [nominal×(1-fraction), nominal×(1+fraction)]
+        #   nominal  = 0  → warning, set to 1.0
+        raw = self.initial_bounds
+        n_coils = len(raw)
+        abs_bounds = np.empty((n_coils, 2), dtype=np.float64)
+        for i in range(n_coils):
+            nominal, frac = float(raw[i, 0]), float(raw[i, 1])
+            if nominal == 0.0:
+                logger.warning(
+                    "Coil %d has nominal=0; setting to 1.0 for fraction-based "
+                    "bounds.  Consider using a non‑zero nominal value.", i)
+                nominal = 1.0
+            abs_bounds[i, 0] = nominal * (1.0 - frac)
+            abs_bounds[i, 1] = nominal * (1.0 + frac)
+        self._abs_bounds = abs_bounds
+
+        n_fixed = int(np.sum(abs_bounds[:, 0] == abs_bounds[:, 1]))
         n_free = n_coils - n_fixed
-        if n_fixed < 1:
-            raise ValueError(
-                f"Bounds cover {n_coils} coils but none are fixed (all have "
-                f"lo != hi).  Set lo == hi for at least one coil to reduce "
-                f"the degree of freedom from {n_coils} to {n_coils - 1}."
-            )
+        if n_free == 0:
+            logger.warning(
+                "All %d coils are fixed — nothing to optimise.", n_coils)
         logger.info(
-            "Bounds: %d coils total, %d fixed (lo==hi), %d free",
+            "Bounds: %d coils total, %d fixed (fraction=0), %d free",
             n_coils, n_fixed, n_free,
         )
 
@@ -304,7 +313,7 @@ class StellaratorObjective:
         set_trace_parameters(self.cfg.nturn, self.cfg.nphi, verbose=False)
         epstot_result = compute_epstot(
             R0,
-            self.cfg.initial_rz,
+            [axis_rz[0] + self.cfg.delt_r, axis_rz[1]],
             initial_gradpsi=initial_gradpsi,
             npart=self.cfg.npart,
             nturn=self.cfg.nturn,
@@ -358,12 +367,19 @@ class StellaratorObjective:
 # ---------------------------------------------------------------------------
 
 def save_hdf5(info: dict, fieldline_data: np.ndarray,
-              output_dir: Path, device_name: Optional[str] = None):
+              output_dir: Path, device_name: Optional[str] = None,
+              tag: Optional[str] = None):
     """Save one individual's results to HDF5."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    parts = [f"Gen{info['Generation']}", f"Ind{info['Individual']}"]
+    gen = info.get('Generation', '?')
+    ind = info.get('Individual', '?')
+
+    if tag:
+        parts = [tag]
+    else:
+        parts = [f"Gen{gen}", f"Ind{ind}"]
     if device_name:
         parts.insert(0, device_name)
     filename = output_dir / ("_".join(parts) + ".h5")
@@ -565,6 +581,24 @@ class DifferentialEvolution:
             logger.info("Resuming from generation %d", start_gen)
         else:
             logger.info("Starting fresh optimisation")
+
+            # ── Evaluate the nominal extcur as a "start" baseline ──────────
+            nominal_extcur = self.cfg.initial_bounds[:, 0].copy()
+            logger.info(
+                "Evaluating nominal extcur baseline: %s", nominal_extcur)
+            start_fit, start_info, start_fd = self.objective.evaluate(
+                nominal_extcur, gen="start", ind_idx=0)
+            self.all_infos.append(start_info)
+            save_hdf5(start_info, start_fd,
+                      self.cfg.output_dir, self.cfg.device_name, tag="start")
+            if start_fit >= StellaratorObjective.INVALID_FITNESS:
+                logger.warning(
+                    "Nominal extcur evaluation FAILED (fitness=%.1f).  "
+                    "Optimisation will proceed but the baseline is invalid.",
+                    start_fit)
+            else:
+                logger.info("Nominal baseline ε = %.6e", start_fit)
+
             self._init_population()
             self._evaluate_and_record(self.pop, gen=0, is_initial=True)
             start_gen = 1
@@ -626,12 +660,15 @@ class DifferentialEvolution:
             self._best_fitness_history.append(best_fit)
 
             pct_invalid = invalid_solutions / self.cfg.n_pop * 100
+            best_extcur = self.pop[best_idx]
             logger.info(
                 "Gen %3d/%d  |  best ε=%.6e  |  invalid=%3d/%d (%.1f%%)  |  "
-                "time=%6.2fs",
+                "time=%6.2fs  |  extcur=%s",
                 gen, self.cfg.max_gen, best_fit,
                 invalid_solutions, self.cfg.n_pop, pct_invalid,
                 t_elapsed,
+                np.array2string(best_extcur, separator=', ',
+                                formatter={'float_kind': lambda x: '%.1f' % x}),
             )
 
             # 5. Checkpoint
@@ -667,8 +704,8 @@ class DifferentialEvolution:
 
     def _init_individual(self) -> np.ndarray:
         return np.array([
-            random.uniform(self.cfg.initial_bounds[i, 0],
-                           self.cfg.initial_bounds[i, 1])
+            random.uniform(self.cfg._abs_bounds[i, 0],
+                           self.cfg._abs_bounds[i, 1])
             for i in range(self.n_dim)
         ], dtype=np.float64)
 
@@ -698,7 +735,7 @@ class DifferentialEvolution:
         for i in range(size):
             mutant[i] = (population[r1][i]
                          + self.cfg.F * (population[r2][i] - population[r3][i]))
-            lo, hi = self.cfg.initial_bounds[i]
+            lo, hi = self.cfg._abs_bounds[i]
             mutant[i] = max(lo, min(hi, mutant[i]))
         return mutant
 

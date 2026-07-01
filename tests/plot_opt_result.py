@@ -117,22 +117,29 @@ def load_optimization_log(log_file):
     Returns
     -------
     data : dict[generation][individual] → {物理量: float, 'extcur': [...]}
-    generations : list[int]
+        Generation "start" contains the nominal baseline entry.
+    generations : list[int]     排好序的整数代数 (不含 "start")
     max_individual : int
+    start_data : dict or None   名义起始点数据 {物理量: ..., 'extcur': [...]}
     """
     data = {}
+    start_data = None
     with open(log_file, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            gen = int(row['Generation'])
+            gen_raw = row['Generation']
             ind = int(row['Individual'])
+            if gen_raw == 'start':
+                gen = 'start'
+            else:
+                gen = int(gen_raw)
             if gen not in data:
                 data[gen] = {}
             extcur_raw = row['extcur']
             extcur = [float(x)
                       for x in extcur_raw.strip('[]').split(',')
                       if x.strip()]
-            data[gen][ind] = {
+            entry = {
                 'epsilon_eff':  float(row['epsilon_eff']),
                 'iota':         float(row['iota']),
                 'volume':       float(row['volume']),
@@ -140,12 +147,16 @@ def load_optimization_log(log_file):
                 'average B':    float(row['average B']),
                 'extcur':       extcur,
             }
+            data[gen][ind] = entry
+            if gen == 'start':
+                start_data = entry
 
-    generations = sorted(data.keys())
+    generations = sorted([g for g in data.keys() if isinstance(g, int)])
     max_individual = (
-        max(max(inds.keys()) for inds in data.values()) if data else 0
+        max(max(inds.keys()) for g, inds in data.items()
+            if isinstance(g, int) and inds) if generations else 0
     )
-    return data, generations, max_individual
+    return data, generations, max_individual, start_data
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -196,6 +207,15 @@ def plot_generation_vs_quantity(
         ax.plot(g, y, 'o', color=color, markersize=5.5,
                 markerfacecolor='white', markeredgewidth=1.2,
                 label=f'Ind {ind}', zorder=3)
+
+    # ── Start marker ──
+    start_data = data.get('start', {}).get(0)
+    if start_data is not None:
+        start_x = generations[0] - 1 if generations else -1
+        ax.scatter([start_x], [start_data[y_key]], s=40, marker='D',
+                   facecolor='#333333', edgecolors='#111111',
+                   linewidths=1.0, zorder=7, label='Start')
+        ax.axvline(x=-0.5, color='#aaaaaa', linewidth=0.6, linestyle=':')
 
     if log_scale:
         ax.set_yscale('log')
@@ -289,7 +309,7 @@ def plot_quantity_vs_quantity(
                 ax.scatter(
                     [x], [y], s=180, marker='*',
                     facecolor=gen_color, edgecolors='#222222',
-                    linewidths=0.8, zorder=6,
+                    linewidths=0.5, zorder=6,
                 )
             else:
                 pass  # 统一 scatter
@@ -300,6 +320,16 @@ def plot_quantity_vs_quantity(
             facecolor=gen_color, edgecolors='white',
             linewidths=0.5, alpha=0.85, zorder=4,
             label=f'Gen {gen}',
+        )
+
+    # ── Start marker ──
+    start_entry = data.get('start', {}).get(0)
+    if start_entry is not None:
+        ax.scatter(
+            [start_entry[x_key]], [start_entry[y_key]],
+            s=40, marker='D',
+            facecolor='#333333', edgecolors='#111111',
+            linewidths=0.5, zorder=8, label='Start',
         )
 
     if log_x:
@@ -403,6 +433,17 @@ def plot_coils_vs_epsilon(
         ax.set_yscale('log')
         ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.5)
 
+        # ── Start marker for this coil ──
+        start_entry = data.get('start', {}).get(0)
+        if start_entry is not None:
+            ax.scatter(
+                [start_entry['extcur'][ci + 1]], [start_entry['epsilon_eff']],
+                s=100, marker='D',
+                facecolor='#333333', edgecolors='#111111',
+                linewidths=0.5, zorder=8,
+                label='Start' if ci == 0 else "",
+            )
+
     # 合并图例
     handles, labels = axes[0].get_legend_handles_labels()
     # 去重
@@ -431,7 +472,7 @@ def plot_coils_vs_epsilon(
 
 if __name__ == '__main__':
     log_file = 'tests/h1_optimisation/h1_optimisation_log.csv'
-    data, generations, max_ind = load_optimization_log(log_file)
+    data, generations, max_ind, start_data = load_optimization_log(log_file)
     print(
         f'Loaded {len(generations)} generation(s), '
         f'max individual = {max_ind}'

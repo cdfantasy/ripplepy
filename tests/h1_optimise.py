@@ -52,30 +52,26 @@ def main():
     print(f"  Nominal coil currents: {nominal_extcur}")
 
     # ── 2.  Define the optimisation problem ──
-    # 5 coils total → degree of freedom = 4 (= n-1).
-    # Coil 0 is fixed via lo == hi; coils 1-4 are free.
+    # 5 coils total.  BOUNDS[i] = [nominal, fraction]
+    #   fraction = 0  →  coil locked at nominal
+    #   fraction > 0  →  [nominal×(1-f), nominal×(1+f)]
     #
-    #   Coil      Nominal       Status               Bounds
-    #   ─────     ───────       ──────               ─────────────────
-    #   0          50000        FIXED (lo=hi)        [ 50000,   50000]
-    #   1           5000        FREE                  [ -5000,   15000]
-    #   2              1        FREE                  [-10000,   10000]
-    #   3         -80000        FREE                  [-100000, -60000]
-    #   4         -40000        FREE                  [ -50000,  -30000]
+    #   Coil      Nominal       fraction       Resulting range
+    #   ─────     ───────       ────────       ─────────────────
+    #   0          50000         0.00           [ 50000,   50000]
+    #   1           5000         0.10           [  4500,    5500]
+    #   2              0*        0.10           [   0.9,     1.1]  (* auto→1)
+    #   3         -80000         0.10           [-88000,  -72000]
+    #   4         -40000         0.10           [-44000,  -36000]
 
-    extcur_fixed = np.array([50000], dtype=np.float64)   # coil 0 fixed
+    nominal_extcur = np.array([50000, 5000, 0, -80000, -40000], dtype=np.float64)
 
-    # BOUNDS = np.array([            # coils 1-4 free
-    #     [ 5000,  5000],          # coil 1
-    #     [0,  5000],          # coil 2
-    #     [-80000, -80000],         # coil 3
-    #     [-40000, -40000],          # coil 4
-    # ], dtype=np.float64)
-    BOUNDS = np.array([           
-        [ 4500,  5500],          
-        [0,  5500],          
-        [-88000, -72000],         
-        [-44000, -36000],         
+    BOUNDS = np.array([
+        [ 50000, 0.10],    # coil 0 — ±10% 
+        [  5000, 0.10],    # coil 1 — ±10%
+        [  3000, 1.0 ],    # coil 2 — ±10% (warning→nominal=1)
+        [-80000, 0.10],    # coil 3 — ±10%
+        [-40000, 0.10],    # coil 4 — ±10%
     ], dtype=np.float64)
 
     INITIAL_RZ = np.array([1.26, 0.0], dtype=np.float64)
@@ -111,18 +107,18 @@ def main():
     )
 
     print("\nStarting optimisation …")
-    print(f"  Coils total  : {len(BOUNDS)}  (n)")
-    n_fixed = int(np.sum(BOUNDS[:, 0] == BOUNDS[:, 1]))
-    print(f"  Fixed         : {n_fixed}  (coils with lo == hi)")
-    print(f"  Free (dof)    : {len(BOUNDS) - n_fixed}  (= n-1)")
-    print(f"  Population    : {config.n_pop}")
-    print(f"  Max gen       : {config.max_gen}")
-    fixed_indices = [i for i in range(len(BOUNDS)) if BOUNDS[i, 0] == BOUNDS[i, 1]]
-    print(f"  Fixed coils   : {fixed_indices}")
-    print(f"  Bounds:")
-    for i, (lo, hi) in enumerate(BOUNDS):
-        tag = "FIXED" if lo == hi else "FREE "
-        print(f"    coil {i}: [{lo:8.1f}, {hi:8.1f}]  ({tag})")
+    print(f"  Coils total  : {len(BOUNDS)}")
+    n_fixed = int(np.sum(BOUNDS[:, 1] == 0.0))
+    print(f"  Fixed (fraction=0) : {n_fixed}")
+    print(f"  Free  (fraction>0) : {len(BOUNDS) - n_fixed}")
+    print(f"  Population   : {config.n_pop}")
+    print(f"  Max gen      : {config.max_gen}")
+    print(f"  Bounds  [nominal, fraction] → [lo, hi]:")
+    for i, (nom, frac) in enumerate(BOUNDS):
+        tag = "FIXED" if frac == 0.0 else "FREE "
+        lo = nom * (1.0 - frac)
+        hi = nom * (1.0 + frac)
+        print(f"    coil {i}: [{nom:8.1f}, {frac:.2f}]  →  [{lo:8.1f}, {hi:8.1f}]  ({tag})")
     print(f"  Output → {OUTPUT_DIR}")
     print()
 
@@ -138,9 +134,12 @@ def main():
     # best_individual is the full extcur (all 5 coils).
     print(f"\nOptimal coil currents:")
     for i, val in enumerate(best_individual):
-        is_fixed = BOUNDS[i, 0] == BOUNDS[i, 1]
+        is_fixed = BOUNDS[i, 1] == 0.0
         tag = "FIXED" if is_fixed else "FREE "
-        change_pct = (val - nominal_extcur[i]) / abs(nominal_extcur[i]) * 100
+        if abs(nominal_extcur[i]) > 1e-12:
+            change_pct = (val - nominal_extcur[i]) / nominal_extcur[i] * 100
+        else:
+            change_pct = float('nan')
         print(f"  coil {i}:  {val:10.1f} A   ({tag})   "
               f"nominal {nominal_extcur[i]:7.1f} A,  Δ = {change_pct:+.1f}%")
 
@@ -151,6 +150,8 @@ def main():
         gen_best = {}
         for info in all_infos:
             g = info["Generation"]
+            if g == "start":
+                continue
             eps = info["epsilon_eff"]
             if g not in gen_best or eps < gen_best[g]:
                 gen_best[g] = eps
