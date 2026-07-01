@@ -113,19 +113,12 @@ class OptimizationConfig:
         Number of field periods.
     initial_rz : tuple[float, float]
         Starting (R, Z) guess for the magnetic axis search.
-    initial_bounds : ndarray, shape (n_free, 2)
-        Lower/upper bounds for each free coil current.
-        Total coils = len(extcur_fixed) + len(initial_bounds).
+    initial_bounds : ndarray, shape (n_coils, 2)
+        Lower/upper bounds for every coil current.  Set lo == hi to fix a
+        coil in place.  At least one coil must be fixed (degree of freedom =
+        n - 1), so at least one row must have lo == hi.
     full_torus : bool
         Whether to expand the mgrid to full torus (2π).
-        Fixed coil currents (prepended to the free variables).
-        Must have at least 1 element: with n coils total, the degree
-        of freedom is n-1, so at least one coil must be fixed.
-    initial_rz : tuple[float, float]
-        Starting (R, Z) guess for the magnetic axis search.
-    initial_bounds : ndarray, shape (n_free, 2)
-        Lower/upper bounds for each free coil current.
-        Total coils = len(extcur_fixed) + len(initial_bounds).
     nturn : int
         Toroidal turns for field-line tracing.
     nphi : int
@@ -165,7 +158,6 @@ class OptimizationConfig:
     restart_best : ndarray or None
         If provided, seed this individual into the initial population.
     """
-    extcur_fixed: np.ndarray
     mgrid_path: str
     nfp: int
     initial_rz: np.ndarray
@@ -195,7 +187,7 @@ class OptimizationConfig:
         self.output_dir = Path(self.output_dir)
         if self.log_file is not None:
             self.log_file = Path(self.log_file)
-        for arr_name in ("extcur_fixed", "initial_rz", "initial_bounds"):
+        for arr_name in ("initial_rz", "initial_bounds"):
             val = getattr(self, arr_name)
             if val is not None:
                 setattr(self, arr_name, np.asarray(val, dtype=np.float64))
@@ -203,17 +195,22 @@ class OptimizationConfig:
             self.restart_best = np.asarray(self.restart_best, dtype=np.float64)
 
         # ── Degrees‑of‑freedom check ──────────────────────────────────────
-        # With n coils total the physical freedom is n-1, so at least one
-        # coil current must be held fixed.
-        n_fixed = len(self.extcur_fixed)
-        n_free = len(self.initial_bounds)
+        # The DE individual is a full extcur vector.  At least one coil must
+        # be fixed (lo == hi) so the degree of freedom is n-1.
+        bounds = self.initial_bounds
+        n_coils = len(bounds)
+        n_fixed = int(np.sum(bounds[:, 0] == bounds[:, 1]))
+        n_free = n_coils - n_fixed
         if n_fixed < 1:
             raise ValueError(
-                f"extcur_fixed must have at least 1 element "
-                f"(got {n_fixed}, n_free={n_free}). "
-                f"With {n_fixed + n_free} coils total the degree of freedom "
-                f"is {n_fixed + n_free - 1}, so ≥1 coil must be fixed."
+                f"Bounds cover {n_coils} coils but none are fixed (all have "
+                f"lo != hi).  Set lo == hi for at least one coil to reduce "
+                f"the degree of freedom from {n_coils} to {n_coils - 1}."
             )
+        logger.info(
+            "Bounds: %d coils total, %d fixed (lo==hi), %d free",
+            n_coils, n_fixed, n_free,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -264,10 +261,9 @@ class StellaratorObjective:
                     full_torus=self.cfg.full_torus,
                 )
                 _mgrid_initialized = True
-                print(f"✓ mgrid initialized successfully")
 
-        extcur_free = np.asarray(extcur_free, dtype=np.float64)
-        extcur = np.concatenate((self.cfg.extcur_fixed, extcur_free))
+        # The DE individual is the full extcur vector — no concatenation needed.
+        extcur = np.asarray(extcur_free, dtype=np.float64)
         with _silent():
             extcur = set_extcur(extcur)
 

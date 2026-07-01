@@ -46,24 +46,23 @@ def main():
     print(f"  Nominal coil currents: {nominal_extcur}")
 
     # ── 2.  Define the optimisation problem ──
-    # 5 coils total → degree of freedom = 4.
-    # Coil 0 (main coil, 50000 A) is held fixed; coils 1-4 are free.
+    # 5 coils total → degree of freedom = 4 (= n-1).
+    # Coil 0 is fixed via lo == hi; coils 1-4 are free.
     #
-    #   Coil      Nominal       Fixed / Free       Bounds
-    #   ─────     ───────       ─────────────       ─────────────────
-    #   0          50000        FIXED
-    #   1           5000        FREE                [ -5000,  15000]
-    #   2              1        FREE                [-10000,  10000]
-    #   3         -80000        FREE                [-100000, -60000]
-    #   4         -40000        FREE                [ -50000, -30000]
+    #   Coil      Nominal       Status               Bounds
+    #   ─────     ───────       ──────               ─────────────────
+    #   0          50000        FIXED (lo=hi)        [ 50000,   50000]
+    #   1           5000        FREE                  [ -5000,   15000]
+    #   2              1        FREE                  [-10000,   10000]
+    #   3         -80000        FREE                  [-100000, -60000]
+    #   4         -40000        FREE                  [ -50000,  -30000]
 
-    extcur_fixed = np.array([50000], dtype=np.float64)   # coil 0 fixed
-
-    BOUNDS = np.array([            # coils 1-4 free
-        [ 5000,  5000],          # coil 1
-        [0,  5000],          # coil 2
-        [-80000, -80000],         # coil 3
-        [-40000, -40000],          # coil 4
+    BOUNDS = np.array([
+        [ 50000,   50000],      # coil 0 — fixed
+        [ 5000,   5000],      # coil 1 — free
+        [0,   5000],      # coil 2 — free
+        [-80000, -80000],      # coil 3 — free
+        [ -40000, -40000],      # coil 4 — free
     ], dtype=np.float64)
 
     INITIAL_RZ = np.array([1.26, 0.0], dtype=np.float64)
@@ -75,7 +74,6 @@ def main():
         mgrid_path=str(MGRID_PATH),
         nfp=3,
         full_torus=False,
-        extcur_fixed=extcur_fixed,
         initial_rz=INITIAL_RZ,
         initial_bounds=BOUNDS,
         nturn=200,
@@ -100,14 +98,18 @@ def main():
     )
 
     print("\nStarting optimisation …")
-    print(f"  Coils total  : {len(extcur_fixed) + len(BOUNDS)}  (n)")
-    print(f"  Fixed        : {len(extcur_fixed)}  (extcur_fixed)")
-    print(f"  Free (dof)   : {len(BOUNDS)}  (= n-1)")
-    print(f"  Population   : {config.n_pop}")
-    print(f"  Max gen      : {config.max_gen}")
-    print(f"  Bounds (free coils 1–4):")
-    for i, (lo, hi) in enumerate(BOUNDS, start=1):
-        print(f"    coil {i}: [{lo:8.1f}, {hi:8.1f}]")
+    print(f"  Coils total  : {len(BOUNDS)}  (n)")
+    n_fixed = int(np.sum(BOUNDS[:, 0] == BOUNDS[:, 1]))
+    print(f"  Fixed         : {n_fixed}  (coils with lo == hi)")
+    print(f"  Free (dof)    : {len(BOUNDS) - n_fixed}  (= n-1)")
+    print(f"  Population    : {config.n_pop}")
+    print(f"  Max gen       : {config.max_gen}")
+    fixed_indices = [i for i in range(len(BOUNDS)) if BOUNDS[i, 0] == BOUNDS[i, 1]]
+    print(f"  Fixed coils   : {fixed_indices}")
+    print(f"  Bounds:")
+    for i, (lo, hi) in enumerate(BOUNDS):
+        tag = "FIXED" if lo == hi else "FREE "
+        print(f"    coil {i}: [{lo:8.1f}, {hi:8.1f}]  ({tag})")
     print(f"  Output → {OUTPUT_DIR}")
     print()
 
@@ -120,12 +122,13 @@ def main():
     print("=" * 60)
     print(f"\nBest fitness (ε_eff^(3/2)): {best_fitness:.6e}")
 
-    full_extcur = np.concatenate([extcur_fixed, best_individual])
-    print(f"\nOptimal coil currents  (coil 0 fixed, coils 1-4 optimised):")
-    for i in range(len(nominal_extcur)):
-        tag = "FIXED" if i == 0 else "FREE "
-        change_pct = (full_extcur[i] - nominal_extcur[i]) / abs(nominal_extcur[i]) * 100
-        print(f"  coil {i}:  {full_extcur[i]:10.1f} A   ({tag})   "
+    # best_individual is the full extcur (all 5 coils).
+    print(f"\nOptimal coil currents:")
+    for i, val in enumerate(best_individual):
+        is_fixed = BOUNDS[i, 0] == BOUNDS[i, 1]
+        tag = "FIXED" if is_fixed else "FREE "
+        change_pct = (val - nominal_extcur[i]) / abs(nominal_extcur[i]) * 100
+        print(f"  coil {i}:  {val:10.1f} A   ({tag})   "
               f"nominal {nominal_extcur[i]:7.1f} A,  Δ = {change_pct:+.1f}%")
 
     # ── 5.  Convergence plot ──
@@ -155,7 +158,7 @@ def main():
         width = 0.35
         ax2.bar(x - width / 2, nominal_extcur, width, alpha=0.6, label="Nominal",
                 color="gray")
-        ax2.bar(x + width / 2, full_extcur, width, alpha=0.8,
+        ax2.bar(x + width / 2, best_individual, width, alpha=0.8,
                 label="Optimised", color="C0")
         ax2.set_xticks(x)
         ax2.set_xticklabels(labels)
