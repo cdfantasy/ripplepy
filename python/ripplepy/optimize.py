@@ -328,14 +328,15 @@ class StellaratorObjective:
 
         # --- plasma parameters ---
         try:
-            vol, Am, iota = calculate_plasma_params(
+            vol, minor_radius, iota = calculate_plasma_params(
                 fieldline_data, axis_fieldline, self.cfg.nturn, self.cfg.nphi, R0
             )
+            Aspect_ratio = R0 / minor_radius
         except Exception as exc:
             logger.warning("Gen %d, Ind %d: plasma param calc failed: %s", gen, ind_idx, exc)
-            vol, Am, iota = np.nan, np.nan, np.nan
+            vol, minor_radius, iota = np.nan, np.nan, np.nan
         
-        print(f"Gen {gen}, Ind {ind_idx}: Axis @ R = {axis_rz[0]:.3f}, epsilon_eff = {epsilon_eff:.3e},iota = {iota:.3f} ,Major radius = {R0:.3f}")
+        print(f"Gen {gen}, Ind {ind_idx}: Axis @ R = {axis_rz[0]:.3f}, epsilon_eff = {epsilon_eff:.3e},iota = {iota:.3f} ,minor radius = {minor_radius:.3f}")
 
         info.update(
             epsilon_eff=float(epsilon_eff),
@@ -345,7 +346,7 @@ class StellaratorObjective:
             failure_type=FailureType.NONE.value,
             failure_message="",
         )
-        info["major radius"] = float(Am)
+        info["Aspect ratio"] = float(Aspect_ratio)
         info["average B"] = float(
             bboundary[0] if hasattr(bboundary, "__len__") else bboundary
         )
@@ -402,7 +403,7 @@ def save_csv(individual_infos: list[dict], filename: Path):
     filename.parent.mkdir(parents=True, exist_ok=True)
     headers = [
         "Generation", "Individual", "extcur", "epsilon_eff",
-        "iota", "volume", "major radius", "average B",
+        "iota", "volume", "Aspect ratio", "average B",
         "failure_flag", "failure_type", "failure_message",
     ]
     with open(filename, mode="w", newline="") as f:
@@ -416,7 +417,7 @@ def save_csv(individual_infos: list[dict], filename: Path):
                 info.get("epsilon_eff"),
                 info.get("iota"),
                 info.get("volume"),
-                info.get("major radius"),
+                info.get("Aspect ratio"),
                 info.get("average B"),
                 info.get("failure_flag"),
                 info.get("failure_type", ""),
@@ -608,9 +609,12 @@ class DifferentialEvolution:
                         "Gen %d, Ind %d: re-initialised (fitness=%.6e)",
                         gen, i, new_fit,
                     )
-                elif tf < StellaratorObjective.INVALID_FITNESS or tf <= cf:
+                elif tf < StellaratorObjective.INVALID_FITNESS and tf <= cf:
                     self.pop[i] = trials[i]
                     self.fitnesses[i] = tf
+                    self.all_infos.append(trial_infos[i])
+                    save_hdf5(trial_infos[i], trial_fieldlines[i],
+                              self.cfg.output_dir, self.cfg.device_name)
 
                 if tf >= StellaratorObjective.INVALID_FITNESS:
                     invalid_solutions += 1

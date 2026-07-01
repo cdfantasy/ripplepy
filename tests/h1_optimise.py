@@ -35,6 +35,12 @@ def main():
     print("H1 Coil-Current Optimisation via Differential Evolution")
     print("=" * 60)
 
+    if OUTPUT_DIR.exists():
+        print(f"\nOutput directory {OUTPUT_DIR} already exists — deleting it and all contents … ")
+        import shutil
+        shutil.rmtree(OUTPUT_DIR)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     print(f"\nLoading mgrid from {MGRID_PATH}")
     initialize_mgrid_field(
         str(MGRID_PATH),
@@ -57,12 +63,19 @@ def main():
     #   3         -80000        FREE                  [-100000, -60000]
     #   4         -40000        FREE                  [ -50000,  -30000]
 
-    BOUNDS = np.array([
-        [ 50000,   50000],      # coil 0 — fixed
-        [ 5000,   5000],      # coil 1 — free
-        [0,   5000],      # coil 2 — free
-        [-80000, -80000],      # coil 3 — free
-        [ -40000, -40000],      # coil 4 — free
+    extcur_fixed = np.array([50000], dtype=np.float64)   # coil 0 fixed
+
+    # BOUNDS = np.array([            # coils 1-4 free
+    #     [ 5000,  5000],          # coil 1
+    #     [0,  5000],          # coil 2
+    #     [-80000, -80000],         # coil 3
+    #     [-40000, -40000],          # coil 4
+    # ], dtype=np.float64)
+    BOUNDS = np.array([           
+        [ 4500,  5500],          
+        [0,  5500],          
+        [-88000, -72000],         
+        [-44000, -36000],         
     ], dtype=np.float64)
 
     INITIAL_RZ = np.array([1.26, 0.0], dtype=np.float64)
@@ -80,8 +93,8 @@ def main():
         nphi=360,
         npart=5000,
         delt_r=0.05,
-        n_pop=8,
-        max_gen=3,
+        n_pop=20,
+        max_gen=5,
         F=0.5,
         CR=0.7,
         processes=8,
