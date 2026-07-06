@@ -310,14 +310,10 @@ class StellaratorObjective:
         initial_gradpsi = compute_initial_gradpsi_nemov(extcur, RZ[0], RZ[1], verbose=False)
 
         # --- trace field line ---
-        set_trace_parameters(self.cfg.nturn, self.cfg.nphi, verbose=False)
+        set_trace_parameters(self.cfg.nturn, self.cfg.nphi, npart=self.cfg.npart, verbose=False)
         epstot_result = compute_epstot(
-            R0,
             [axis_rz[0] + self.cfg.delt_r, axis_rz[1]],
             initial_gradpsi=initial_gradpsi,
-            npart=self.cfg.npart,
-            nturn=self.cfg.nturn,
-            nphi=self.cfg.nphi,
             return_fieldline=True,
             verbose=False,
         )

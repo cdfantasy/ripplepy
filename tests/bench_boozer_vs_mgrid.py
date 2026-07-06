@@ -94,14 +94,14 @@ def run_benchmark(name, vmec_path, mgrid_path, extcur, nfp,
     print("  Running ripplepy_pyneo (mgrid field, DLSODE trace, η-state-machine)...")
     initialize_mgrid_field(mgrid_path, nfp, full_torus=full_torus)
     set_extcur(extcur)
-    set_trace_parameters(nturn, nphi, verbose=False)
+    set_trace_parameters(nturn, nphi, npart=npart, verbose=False)
     rp_mgrid = []
     t0 = time.time()
     for s, rz in zip(sur_idx, RZ_points):
         eps, bnd, ist = compute_epstot(
-            R0_vmec, rz,
+            rz,
             initial_gradpsi=np.array([1, 0, 0], dtype=np.float64),
-            npart=npart, nturn=nturn, nphi=nphi, verbose=False,
+            verbose=False,
         )
         rp_mgrid.append(eps if eps is not None else np.nan)
     t1 = time.time()

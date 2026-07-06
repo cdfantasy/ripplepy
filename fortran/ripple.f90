@@ -20,7 +20,7 @@ module effective_ripple
     integer :: ilinx, iliny, ilinz
     
     ! Tracing parameters (shared by all scans)
-    integer :: nturn, nphi_trace
+    integer :: nturn, nphi_trace, npart_trace
     integer :: npoints
     integer :: trace_verbose = 0
     ! Physical constants
@@ -149,13 +149,15 @@ contains
     ! Purpose: Set field line tracing parameters (shared by all scans)
     ! Input: nturn_in - number of turns, nphi_in - points per turn
     !============================================================================
-    subroutine set_trace_parameters(nturn_in, nphi_in)
+    subroutine set_trace_parameters(nturn_in, nphi_in, npart_in)
       implicit none
       integer, intent(in) :: nturn_in, nphi_in
+      integer, intent(in), optional :: npart_in
       
       nturn = nturn_in
       nphi_trace = nphi_in
       npoints = nturn * nphi_trace
+      if (present(npart_in)) npart_trace = npart_in
       
       ! write(*,'(A,I0,A,I0,A,I0,A)') 'Trace parameters set: nturn=', nturn, &
       !                                ', nphi=', nphi_trace, ', npoints=', npoints
@@ -189,7 +191,7 @@ contains
     !         Bboundary - boundary magnetic field strength
     !============================================================================
     subroutine compute_ripple(initial_rz, initial_gradpsi, &
-                         epsilon_eff, Bboundary, fieldline_data, trace_istate)
+                         epsilon_eff, Bboundary, R0, fieldline_data, trace_istate)
       implicit none
       
       ! real(8), intent(in) :: extcur(:)
@@ -197,6 +199,7 @@ contains
       real(8), intent(in) :: initial_gradpsi(3)
       real(8), intent(out) :: epsilon_eff
       real(8), intent(out) :: Bboundary
+      real(8), intent(out) :: R0
       real(8), intent(out) :: fieldline_data(:, :)
       integer, intent(out) :: trace_istate
       
@@ -209,6 +212,7 @@ contains
         write(*,'(A)') 'Error: Field not initialized. Call initialize_field first.'
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
+        R0 = 1.0d0
         trace_istate = -100
         return
       endif
@@ -217,6 +221,7 @@ contains
         write(*,'(A)') 'Error: Trace parameters not set. Call set_trace_parameters first.'
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
+        R0 = 1.0d0
         trace_istate = -101
         return
       endif
@@ -235,6 +240,7 @@ contains
       if (trace_istate /= 0) then
         epsilon_eff = 0.0d0
         Bboundary = 0.0d0
+        R0 = 1.0d0
         deallocate(fieldline_local)
         return
       endif
@@ -242,7 +248,10 @@ contains
       allocate(geocur(npoints))
       call geodesic_curvature_internal(fieldline_local, geocur, Bboundary)
       
-      call effective_ripple_internal(fieldline_local, geocur, epsilon_eff)
+      call compute_r0_from_fieldline(fieldline_local, R0)
+      ! write(*,'(A,E15.6)') 'Computed R0 = ', R0
+      ! R0 = 1.0d0 
+      call effective_ripple_pyneo(fieldline_local, geocur, R0, epsilon_eff)
       
       Bboundary_current = Bboundary
       epsilon_eff_current = epsilon_eff
@@ -950,15 +959,15 @@ contains
 ! pyneo-style η-state integration (matches rhs_bo1.f90 + flint_bo.f90)
 ! Uses existing fieldline_data from LSODE trace.
 !=======================================================================
-    subroutine effective_ripple_pyneo(fieldline_data, geocur, R0, npart, epsilon_eff)
+    subroutine effective_ripple_pyneo(fieldline_data, geocur, R0, epsilon_eff)
       implicit none
       real(8), intent(in)  :: fieldline_data(:, :)
       real(8), intent(in)  :: geocur(:)
       real(8), intent(in)  :: R0
-      integer, intent(in)  :: npart
       real(8), intent(out) :: epsilon_eff
 
       integer :: npts, i, k
+      integer :: npart
       real(8) :: bmax, bmin, b0, heta, eta_val, b_loc, subsq, sqrt_term
       real(8) :: Bmag, grad_psi, kappa_g, ds_over_B, ds, dphi, r, Bphi
       real(8) :: H_acc, I_acc, bigint_total, prev_I, prev_H, cur_I, cur_H
@@ -968,6 +977,7 @@ contains
       real(8), allocatable :: ds_over_B_arr(:)
 
       npts = size(fieldline_data, 1)
+      npart = npart_trace
 
       if (npts < 2) then
         if (trace_verbose /= 0) write(*, '(A)') 'Error: Not enough data points'
@@ -1313,5 +1323,106 @@ subroutine integrate_bounce_segment(bp, i1, i2, B, gp, kg, ds_over_B, b0_ref, Ho
         Iout = Iout + termI
     end do
 end subroutine
+
+!=======================================================================
+! Compute effective major radius R0 from field line data.
+!
+!   R0 = volume_p / (2π × cross_area_p)
+!      = Σ A_i × R̄_i / Σ A_i
+!
+! Points in each φ-bin are ordered by poloidal angle around the
+! cross-section centroid (standard method for flux-surface geometry).
+!=======================================================================
+subroutine compute_r0_from_fieldline(fieldline_data, R0)
+    implicit none
+    real(8), intent(in)  :: fieldline_data(:, :)
+    real(8), intent(out) :: R0
+
+    integer :: npts, i, j, k, nphi_local, nturn_local
+    real(8) :: area_sum, weighted_sum, area_i, R_center, Z_center
+    real(8) :: area_green
+    real(8), allocatable :: R_bin(:), Z_bin(:), theta(:)
+    integer, allocatable :: order(:)
+
+    npts = size(fieldline_data, 1)
+    nphi_local = nphi_trace
+    nturn_local = npts / nphi_local
+
+    if (nturn_local < 2 .or. nphi_local < 2) then
+        R0 = 1.0d0
+        return
+    end if
+
+    allocate(R_bin(nturn_local), Z_bin(nturn_local))
+    allocate(theta(nturn_local), order(nturn_local))
+
+    area_sum = 0.0d0
+    weighted_sum = 0.0d0
+
+    do j = 1, nphi_local
+        ! Collect (R, Z) at φ-bin j across all turns
+        do k = 1, nturn_local
+            i = j + (k - 1) * nphi_local
+            R_bin(k) = fieldline_data(i, 1)
+            Z_bin(k) = fieldline_data(i, 2)
+        end do
+
+        ! Centroid of this cross-section
+        R_center = sum(R_bin) / real(nturn_local, 8)
+        Z_center = sum(Z_bin) / real(nturn_local, 8)
+
+        ! Poloidal angles around centroid
+        do k = 1, nturn_local
+            theta(k) = atan2(Z_bin(k) - Z_center, R_bin(k) - R_center)
+            order(k) = k
+        end do
+
+        ! Sort indices by angle (insertion sort, nturn_local ~200)
+        call argsort_theta(theta, order, nturn_local)
+
+        ! Green's theorem: A = 0.5 * Σ (R_k * Z_{k+1} - Z_k * R_{k+1})
+        area_green = 0.0d0
+        do k = 1, nturn_local - 1
+            area_green = area_green + &
+                R_bin(order(k)) * Z_bin(order(k+1)) - &
+                Z_bin(order(k)) * R_bin(order(k+1))
+        end do
+        ! Close the loop
+        area_green = area_green + &
+            R_bin(order(nturn_local)) * Z_bin(order(1)) - &
+            Z_bin(order(nturn_local)) * R_bin(order(1))
+        area_i = 0.5d0 * abs(area_green)
+
+        area_sum = area_sum + area_i
+        weighted_sum = weighted_sum + area_i * R_center
+    end do
+
+    if (area_sum > 1.0d-15) then
+        R0 = weighted_sum / area_sum
+    else
+        R0 = 1.0d0
+    end if
+
+    deallocate(R_bin, Z_bin, theta, order)
+end subroutine compute_r0_from_fieldline
+
+! Stable insertion sort: order indices by ascending theta values
+subroutine argsort_theta(theta, order, n)
+    implicit none
+    real(8), intent(in)    :: theta(:)
+    integer, intent(inout) :: order(:)
+    integer, intent(in)    :: n
+    integer :: i, j, key
+    do i = 2, n
+        key = order(i)
+        j = i - 1
+        do while (j >= 1 .and. theta(order(j)) > theta(key))
+            order(j+1) = order(j)
+            j = j - 1
+        end do
+        order(j+1) = key
+    end do
+end subroutine argsort_theta
+    
     
 end module effective_ripple

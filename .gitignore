@@ -40,6 +40,7 @@ fortran/pspline/*.mod
 # test
 tests/h1_optimisation/
 
+tests/
 mgrid*
 log_xgrid*
 extcur*

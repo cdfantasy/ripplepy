@@ -63,14 +63,14 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
     
     print(f'major radius from vmec: {R0_vmec:.4f}, from ripplepy: {R0_rp:.4f}')
     print("  Running ripplepy ...")
-    set_trace_parameters(nturn, nphi, verbose=False)
+    set_trace_parameters(nturn, nphi, npart=npart, verbose=False)
     rp_new = []
     
     def _compute_one(rz):
         eps, bnd, ist = compute_epstot(
-            R0_rp, rz,
+            rz,
             initial_gradpsi=np.array([1,0,0], dtype=np.float64),
-            npart=npart, nturn=nturn, nphi=nphi, verbose=False,
+            verbose=False,
         )
         return eps if eps is not None else np.nan
 
@@ -88,8 +88,8 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
         rp_old = []
         for rz in RZ_points:
             fld = np.zeros((nturn*nphi, 20), dtype=np.float64, order='F')
-            eps, Bb, ist = compute_epstot(R0_rp, rz,
-                                        np.array([1,0,0], dtype=np.float64), fld)
+            eps, Bb, ist = compute_epstot(rz,
+                                        np.array([1,0,0], dtype=np.float64))
             rp_old.append(eps)
         print(f"\n  {'s':>6s}  {'pyneo':>12s} {'py_old':>12s} {'old/py':>8s}"
             f"{'rp_new':>12s}  {'new/py':>8s}")
@@ -133,7 +133,7 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
         return py_eps, rp_new
 
 
-BASE = "/Users/zkgao/ripplepy"
+BASE = "/home/zkg/ripplepy"
 
 # ═══════════════════════════════════════════════════════════════
 # NCSX
@@ -153,27 +153,27 @@ BASE = "/Users/zkgao/ripplepy"
 # ═══════════════════════════════════════════════════════════════
 
 
-# run_benchmark(
-#     "CFQS",
-#     f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
-#     f"{BASE}/tests/test_file/cfqs_boozmn.nc",
-#     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
-#     (1.21, 0), None, 2,
-#     np.linspace(0.1, 1, 11),
-#     nturn=200, nphi=360, npart=5000,
-#     full_torus=False,
-# )
-
-# # ═══════════════════════════════════════════════════════════════
-# # H1
-# # ═══════════════════════════════════════════════════════════════
 run_benchmark(
-    "H1",
-    f"{BASE}/tests/test_file/wout_h1_design.nc",
-    f"{BASE}/tests/test_file/h1_boozmn.nc",
-    f"{BASE}/tests/test_file/mgrid_h1_design.nc",
-    (1.26, 0), [50000, 5000, 2000, -80000, -40000], 3,
+    "CFQS",
+    f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
+    f"{BASE}/tests/test_file/cfqs_boozmn.nc",
+    f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
+    (1.21, 0), None, 2,
     np.linspace(0.1, 1, 11),
     nturn=200, nphi=360, npart=5000,
     full_torus=False,
 )
+
+# # ═══════════════════════════════════════════════════════════════
+# # H1
+# # ═══════════════════════════════════════════════════════════════
+# run_benchmark(
+#     "H1",
+#     f"{BASE}/tests/test_file/wout_H1_design_kh0_kv1_m13_n44_fixed_iota_free.nc",
+#     f"{BASE}/tests/test_file/h1_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
+#     (1.26, 0), [50000, 5000, 2000, -80000, -40000], 3,
+#     np.linspace(0.1, 1, 11),
+#     nturn=200, nphi=360, npart=5000,
+#     full_torus=False,
+# )
