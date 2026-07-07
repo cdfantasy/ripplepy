@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Plot optimisation results with publication-quality styling.
 
 Usage
@@ -59,13 +60,9 @@ def set_publication_style():
         'savefig.bbox': 'tight',
         'savefig.pad_inches': 0.08,
         # ── LaTeX ──
-        'text.usetex': False,          # 若系统已装 LaTeX 可改为 True
-        'mathtext.fontset': 'stix',    # STIX 字体呈现数学符号
+        'text.usetex': False,
+        'mathtext.fontset': 'stix',
     })
-
-    # import seaborn as sns
-    # sns.set_style('ticks')
-    # sns.set_context('paper', font_scale=1.3)
 
 
 set_publication_style()
@@ -75,7 +72,6 @@ set_publication_style()
 # 常量
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 物理量 → 坐标轴标签（支持 LaTeX / mathtext）
 QUANTITY_LABELS = {
     'epsilon_eff': r'$\varepsilon_{\mathrm{eff}}^{3/2}$',
     'iota':        r'$\iota$',
@@ -86,29 +82,32 @@ QUANTITY_LABELS = {
 
 PHYSICAL_QUANTITIES = list(QUANTITY_LABELS.keys())
 
-# 颜色方案 — ColorBrewer Set1 (8 色) + 扩展，色盲友好
-INDIVIDUAL_COLORS = [
-    '#e41a1c',  # red
-    '#377eb8',  # blue
-    '#4daf4a',  # green
-    '#984ea3',  # purple
-    '#ff7f00',  # orange
-    '#a65628',  # brown
-    '#f781bf',  # pink
-    '#999999',  # grey
-    '#66c2a5',  #
-    '#fc8d62',  #
-    '#8da0cb',  #
-    '#e78ac3',  #
-    '#a6d854',  #
-    '#ffd92f',  #
-    '#e5c494',  #
-    '#b3b3b3',  #
-]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 1. 辅助函数：数据验证
+# ═══════════════════════════════════════════════════════════════════════════
+
+def is_valid_entry(entry):
+    """
+    检查个体是否有效。
+    
+    根据 failure_flag 判断：
+    - failure_flag 为 False 或 'none' 表示有效
+    - 其他值（如 'tracing_failed'）表示无效
+    """
+    if entry is None:
+        return False
+    # 从CSV读取的 failure_flag 可能是 bool 或 string
+    failure_flag = entry.get('failure_flag', True)
+    # 如果是字符串，检查是否为 'none' 或 'False'
+    if isinstance(failure_flag, str):
+        return failure_flag.lower() in ('none', 'false', '')
+    # 如果是布尔值
+    return not bool(failure_flag)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 1. 数据加载
+# 2. 数据加载
 # ═══════════════════════════════════════════════════════════════════════════
 
 def load_optimization_log(log_file):
@@ -116,7 +115,7 @@ def load_optimization_log(log_file):
 
     Returns
     -------
-    data : dict[generation][individual] → {物理量: float, 'extcur': [...]}
+    data : dict[generation][individual] → {物理量: float, 'extcur': [...], 'failure_flag': ...}
     generations : list[int]
     max_individual : int
     start_data : dict or None
@@ -132,6 +131,16 @@ def load_optimization_log(log_file):
             return float(val)
         except (ValueError, TypeError):
             return float('nan')
+    
+    def parse_failure_flag(val):
+        """解析 failure_flag."""
+        if val is None or val == '':
+            return None
+        if val.lower() in ('none', 'false', '0'):
+            return False
+        if val.lower() in ('true', '1'):
+            return True
+        return val  # 返回原始字符串（如 'tracing_failed'）
     
     with open(log_file, 'r') as f:
         reader = csv.DictReader(f)
@@ -154,12 +163,14 @@ def load_optimization_log(log_file):
             extcur = [float(x) for x in extcur_raw.strip('[]').split(',') if x.strip()]
             
             entry = {
-                'epsilon_eff':  safe_float(row.get('epsilon_eff', '')),
-                'iota':         safe_float(row.get('iota', '')),
-                'volume':       safe_float(row.get('volume', '')),
-                'Aspect ratio': safe_float(row.get('Aspect ratio', '')),
-                'average B':    safe_float(row.get('average B', '')),
-                'extcur':       extcur,
+                'epsilon_eff':   safe_float(row.get('epsilon_eff', '')),
+                'iota':          safe_float(row.get('iota', '')),
+                'volume':        safe_float(row.get('volume', '')),
+                'Aspect ratio':  safe_float(row.get('Aspect ratio', '')),
+                'average B':     safe_float(row.get('average B', '')),
+                'extcur':        extcur,
+                'failure_flag':  parse_failure_flag(row.get('failure_flag', '')),
+                'failure_reason': row.get('failure_reason', ''),
             }
             data[gen][ind] = entry
             
@@ -176,7 +187,7 @@ def load_optimization_log(log_file):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 2. Plot 1 — Generation (横轴) vs 物理量 (纵轴)，Individual 分色
+# 3. Plot 1 — Generation (横轴) vs 物理量 (纵轴)
 # ═══════════════════════════════════════════════════════════════════════════
 
 def plot_generation_vs_quantity(
@@ -184,53 +195,57 @@ def plot_generation_vs_quantity(
     generations,
     y_key='epsilon_eff',
     log_scale=None,
-    figsize=(7.2, 4.8),
+    figsize=(14, 10),
     title=None,
     output=None,
+    cmap='viridis',
 ):
-    """Plot 1: 横轴 = Generation，纵轴 = 物理量.
-
-    Parameters
-    ----------
-    y_key : str       PHYSICAL_QUANTITIES 之一
-    log_scale : bool | None  None 时 epsilon_eff 默认使用对数纵轴
-    output : str | None      保存路径，None 则 plt.show()
-    """
+    """Plot 1: 横轴 = Generation，纵轴 = 物理量，颜色表示代数"""
     if log_scale is None:
         log_scale = (y_key == 'epsilon_eff')
 
-    # 收集数据
+    # 收集有效数据（只根据 failure_flag 过滤）
     gen_list, ind_list, y_list = [], [], []
     for gen in generations:
-        for ind in sorted(data[gen].keys()):
-            y_val = data[gen][ind][y_key]
-            if np.isfinite(y_val):  # ✅ 过滤NaN
+        for ind, entry in data[gen].items():
+            # 只检查 failure_flag 是否有效
+            if not is_valid_entry(entry):
+                continue
+            y_val = entry.get(y_key, float('nan'))
+            if np.isfinite(y_val):
                 gen_list.append(gen)
                 ind_list.append(ind)
                 y_list.append(y_val)
 
+    if not y_list:
+        print(f"Warning: No valid data for {y_key} (after filtering)")
+        return
+
     max_ind = max(ind_list) if ind_list else 0
 
     fig, ax = plt.subplots(figsize=figsize)
-    fig.subplots_adjust(right=0.78)  # 给图例留空间
-
+    
+    norm = plt.Normalize(vmin=min(generations), vmax=max(generations))
+    cmap_obj = plt.get_cmap(cmap)
+    
     for ind in range(max_ind + 1):
         mask = [i == ind for i in ind_list]
         if not any(mask):
             continue
         g = np.array([gen_list[i] for i, m in enumerate(mask) if m])
         y = np.array([y_list[i] for i, m in enumerate(mask) if m])
-        color = INDIVIDUAL_COLORS[ind % len(INDIVIDUAL_COLORS)]
+        
+        for gi, gen in enumerate(g):
+            color = cmap_obj(norm(gen))
+            ax.scatter(gen, y[gi], s=25, color=color, 
+                      marker='o', alpha=0.6, edgecolors='white', 
+                      linewidths=0.3, zorder=3)
 
-        ax.plot(g, y, 'o', color=color, markersize=5.5,
-                markerfacecolor='white', markeredgewidth=1.2,
-                label=f'Ind {ind}', zorder=3)
-
-    # ── Start marker ──
+    # Start marker
     start_data = data.get('start', {}).get(0)
-    if start_data is not None:
+    if start_data is not None and is_valid_entry(start_data):
         start_x = generations[0] - 1 if generations else -1
-        ax.scatter([start_x], [start_data[y_key]], s=40, marker='D',
+        ax.scatter([start_x], [start_data[y_key]], s=100, marker='D',
                    facecolor='#333333', edgecolors='#111111',
                    linewidths=1.0, zorder=7, label='Start')
         ax.axvline(x=-0.5, color='#aaaaaa', linewidth=0.6, linestyle=':')
@@ -242,31 +257,28 @@ def plot_generation_vs_quantity(
             ticker.LogLocator(base=10, subs=np.arange(2, 10) * 0.1, numticks=12)
         )
 
-    # 刻度：整数代
     ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
-
     ax.set_xlabel('Generation')
     ax.set_ylabel(QUANTITY_LABELS.get(y_key, y_key))
     if title:
         ax.set_title(title, pad=8)
 
-    # 图例
-    legend = ax.legend(
-        title='Individual', title_fontsize=12,
-        bbox_to_anchor=(1.02, 1), loc='upper left',
-        borderaxespad=0, handlelength=1.5, handletextpad=0.6,
-    )
-    legend.get_frame().set_linewidth(0.6)
+    sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Generation', fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
+    cbar.outline.set_linewidth(0.8)
 
     if output:
-        fig.savefig(output)
+        fig.savefig(output, dpi=300, bbox_inches='tight')
     else:
         plt.show()
     plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. Plot 2 — 物理量 vs 物理量，按 Generation 分色，最优个体突出
+# 4. Plot 2 — 物理量 vs 物理量
 # ═══════════════════════════════════════════════════════════════════════════
 
 def plot_quantity_vs_quantity(
@@ -278,77 +290,61 @@ def plot_quantity_vs_quantity(
     best_mode='min',
     log_x=False,
     log_y=None,
-    figsize=(7.2, 5.0),
+    figsize=(14, 10),
     title=None,
     output=None,
+    cmap='viridis',
 ):
-    """Plot 2: 横/纵轴均为物理量，不同 Generation 不同颜色.
-
-    同一代内所有个体同色；best_key 最优的个体用 ★ 突出显示。
-
-    Parameters
-    ----------
-    x_key, y_key : str  横 / 纵轴物理量
-    best_key : str       判定「最优」的物理量
-    best_mode : 'min' | 'max'
-    log_x, log_y : bool
-    """
+    """Plot 2: 物理量 vs 物理量，颜色表示代数"""
     if log_y is None:
         log_y = (y_key == 'epsilon_eff')
 
-    n_gen = len(generations)
-    # 跨多代使用 viridis，少量代用 tab10
-    if n_gen <= 10:
-        gen_colors = cm.tab10(np.linspace(0, 1, n_gen))
-    else:
-        gen_colors = cm.viridis(np.linspace(0.05, 0.95, n_gen))
+    norm = plt.Normalize(vmin=min(generations), vmax=max(generations))
+    cmap_obj = plt.get_cmap(cmap)
 
     fig, ax = plt.subplots(figsize=figsize)
-    fig.subplots_adjust(right=0.78)
+    
+    for gen in generations:
+        gen_color = cmap_obj(norm(gen))
+        
+        # 获取有效个体（只根据 failure_flag 过滤）
+        valid_entries = {
+            ind: entry for ind, entry in data[gen].items()
+            if is_valid_entry(entry)
+        }
+        
+        if not valid_entries:
+            continue
+        
+        # 找最优个体
+        best_idx = min(valid_entries.keys(), 
+                      key=lambda i: valid_entries[i].get(best_key, float('inf')))
+        
+        for ind, entry in valid_entries.items():
+            x = entry.get(x_key, float('nan'))
+            y = entry.get(y_key, float('nan'))
+            
+            if not (np.isfinite(x) and np.isfinite(y)):
+                continue
 
-    # 一代一代绘制
-    for gi, gen in enumerate(generations):
-        gen_color = gen_colors[gi]
-        inds = sorted(data[gen].keys())
-
-        # 最优个体
-        best_vals = [data[gen][i][best_key] for i in inds]
-        best_idx = np.argmin(best_vals) if best_mode == 'min' else np.argmax(best_vals)
-
-        xs, ys = [], []
-        for ii, ind in enumerate(inds):
-            x = data[gen][ind][x_key]
-            y = data[gen][ind][y_key]
-            xs.append(x)
-            ys.append(y)
-
-            if ii == best_idx:
-                # ★ 突出
-                ax.scatter(
-                    [x], [y], s=180, marker='*',
-                    facecolor=gen_color, edgecolors='#222222',
-                    linewidths=0.5, zorder=6,
-                )
+            if ind == best_idx:
+                ax.scatter([x], [y], s=180, marker='*',
+                          facecolor=gen_color, edgecolors='#222222',
+                          linewidths=0.5, zorder=6)
             else:
-                pass  # 统一 scatter
+                ax.scatter([x], [y], s=42, marker='o',
+                          facecolor=gen_color, edgecolors='white',
+                          linewidths=0.5, alpha=0.7, zorder=4)
 
-        # 所有个体（包括最优）统一 scatter —— 但最优会被覆盖为 ★ 因为 zorder 更高
-        ax.scatter(
-            xs, ys, s=42, marker='o',
-            facecolor=gen_color, edgecolors='white',
-            linewidths=0.5, alpha=0.85, zorder=4,
-            label=f'Gen {gen}',
-        )
-
-    # ── Start marker ──
+    # Start marker
     start_entry = data.get('start', {}).get(0)
-    if start_entry is not None:
-        ax.scatter(
-            [start_entry[x_key]], [start_entry[y_key]],
-            s=40, marker='D',
-            facecolor='#333333', edgecolors='#111111',
-            linewidths=0.5, zorder=8, label='Start',
-        )
+    if start_entry is not None and is_valid_entry(start_entry):
+        sx = start_entry.get(x_key, float('nan'))
+        sy = start_entry.get(y_key, float('nan'))
+        if np.isfinite(sx) and np.isfinite(sy):
+            ax.scatter([sx], [sy], s=100, marker='D',
+                      facecolor='#333333', edgecolors='#111111',
+                      linewidths=0.5, zorder=8, label='Start')
 
     if log_x:
         ax.set_xscale('log')
@@ -364,22 +360,22 @@ def plot_quantity_vs_quantity(
     if title:
         ax.set_title(title, pad=8)
 
-    # 图例：去重（matplotlib 自动处理相同 label）
-    legend = ax.legend(
-        title='Generation', title_fontsize=12,
-        bbox_to_anchor=(1.02, 1), loc='upper left',
-        borderaxespad=0, handlelength=1.5, handletextpad=0.6,
-    )
-    legend.get_frame().set_linewidth(0.6)
+    sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Generation', fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
+    cbar.outline.set_linewidth(0.8)
 
     if output:
-        fig.savefig(output)
+        fig.savefig(output, dpi=300, bbox_inches='tight')
     else:
         plt.show()
     plt.close(fig)
 
 
-# 4. Plot 3 — 分面散点：每个 coil vs ε_eff
+# ═══════════════════════════════════════════════════════════════════════════
+# 5. Plot 3 — 线圈电流 vs ε_eff
 # ═══════════════════════════════════════════════════════════════════════════
 
 def plot_coils_vs_epsilon(
@@ -387,124 +383,173 @@ def plot_coils_vs_epsilon(
     generations,
     best_key='epsilon_eff',
     best_mode='min',
-    figsize=(14, 4.5),
+    figsize=None,
     output=None,
+    cmap='viridis',
+    max_coils_per_row=5,
 ):
-    """分面散点图：4 个子图，横轴 = coil current，纵轴 = epsilon_eff.
-
-    按 Generation 分色；每代最优个体 ★ 突出。
-    """
-    n_gen = len(generations)
-    if n_gen <= 10:
-        gen_colors = cm.tab10(np.linspace(0, 1, n_gen))
-    else:
-        gen_colors = cm.viridis(np.linspace(0.05, 0.95, n_gen))
-
-    coil_labels = ['Coil 1', 'Coil 2', 'Coil 3', 'Coil 4']
-    n_coils = 4
-
-    fig, axes = plt.subplots(1, n_coils, figsize=figsize, sharey=True)
-    fig.subplots_adjust(right=0.78)
-
-    # 收集各 coil 的 range 以统一 xlim
-    all_coil_vals = {c: [] for c in range(n_coils)}
+    """分面散点图：每个线圈 vs ε_eff，颜色表示代数"""
+    # 动态检测线圈数量
+    n_coils = None
     for gen in generations:
         for ind in data[gen].keys():
-            extcur = data[gen][ind]['extcur']
-            for c in range(n_coils):
-                all_coil_vals[c].append(extcur[c + 1])
-
+            extcur = data[gen][ind].get('extcur', [])
+            if extcur:
+                n_coils = len(extcur)
+                break
+        if n_coils is not None:
+            break
+    
+    if n_coils is None:
+        print("Error: No valid extcur data found")
+        return
+    
+    print(f"Detected {n_coils} coils")
+    
+    # 动态计算图形尺寸
+    if figsize is None:
+        n_rows = (n_coils + max_coils_per_row - 1) // max_coils_per_row
+        n_cols = min(n_coils, max_coils_per_row)
+        figsize = (n_cols * 4.5, n_rows * 4.0)
+    
+    norm = plt.Normalize(vmin=min(generations), vmax=max(generations))
+    cmap_obj = plt.get_cmap(cmap)
+    
+    n_rows = (n_coils + max_coils_per_row - 1) // max_coils_per_row
+    n_cols = min(n_coils, max_coils_per_row)
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, 
+                            sharey=True, squeeze=False)
+    axes = axes.flatten()
+    
+    # 隐藏多余的子图
+    for idx in range(n_coils, len(axes)):
+        axes[idx].set_visible(False)
+    
     for ci in range(n_coils):
         ax = axes[ci]
-        vals = all_coil_vals[ci]
-        if vals:
-            margin = (max(vals) - min(vals)) * 0.1 or abs(max(vals)) * 0.05
-            ax.set_xlim(min(vals) - margin, max(vals) + margin)
-
-        for gi, gen in enumerate(generations):
-            gen_color = gen_colors[gi]
-            inds = sorted(data[gen].keys())
-            best_vals = [data[gen][i][best_key] for i in inds]
-            best_idx = np.argmin(best_vals) if best_mode == 'min' else np.argmax(best_vals)
-
+        
+        # 收集该线圈的数据范围（只包含有效个体）
+        all_vals = []
+        for gen in generations:
+            for ind, entry in data[gen].items():
+                if not is_valid_entry(entry):
+                    continue
+                extcur = entry.get('extcur', [])
+                if ci < len(extcur):
+                    all_vals.append(extcur[ci])
+        
+        if all_vals:
+            margin = (max(all_vals) - min(all_vals)) * 0.1 or abs(max(all_vals)) * 0.05
+            ax.set_xlim(min(all_vals) - margin, max(all_vals) + margin)
+        
+        # 绘图
+        for gen in generations:
+            gen_color = cmap_obj(norm(gen))
+            
+            # 获取有效个体（只根据 failure_flag 过滤）
+            valid_entries = {
+                ind: entry for ind, entry in data[gen].items()
+                if is_valid_entry(entry)
+            }
+            
+            if not valid_entries:
+                continue
+            
+            best_idx = min(valid_entries.keys(),
+                          key=lambda i: valid_entries[i].get(best_key, float('inf')))
+            
             xs, ys = [], []
-            for ii, ind in enumerate(inds):
-                coil_val = data[gen][ind]['extcur'][ci + 1]
-                eps = data[gen][ind]['epsilon_eff']
+            for ind, entry in valid_entries.items():
+                extcur = entry.get('extcur', [])
+                if ci >= len(extcur):
+                    continue
+                    
+                coil_val = extcur[ci]
+                eps = entry.get(best_key, float('nan'))
+                
+                if not np.isfinite(eps):
+                    continue
+                    
                 xs.append(coil_val)
                 ys.append(eps)
-
-                if ii == best_idx:
+                
+                if ind == best_idx:
                     ax.scatter([coil_val], [eps], s=140, marker='*',
-                               facecolor=gen_color, edgecolors='#222222',
-                               linewidths=0.8, zorder=6)
-
-            ax.scatter(xs, ys, s=28, marker='o',
-                       facecolor=gen_color, edgecolors='white',
-                       linewidths=0.4, alpha=0.8, zorder=4,
-                       label=f'Gen {gen}' if ci == 0 else "")
-
+                              facecolor=gen_color, edgecolors='#222222',
+                              linewidths=0.8, zorder=6)
+            
+            if xs:
+                ax.scatter(xs, ys, s=28, marker='o',
+                          facecolor=gen_color, edgecolors='white',
+                          linewidths=0.4, alpha=0.7, zorder=4)
+        
+        coil_labels = [f'Coil {i}' for i in range(n_coils)]
         ax.set_xlabel(coil_labels[ci] + '  [A]')
         ax.ticklabel_format(style='scientific', axis='x', scilimits=(-2, 4))
-        if ci == 0:
-            ax.set_ylabel(QUANTITY_LABELS['epsilon_eff'])
+        if ci % n_cols == 0:
+            ax.set_ylabel(QUANTITY_LABELS.get(best_key, best_key))
         ax.set_yscale('log')
         ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.5)
-
-        # ── Start marker for this coil ──
+        
+        # Start marker
         start_entry = data.get('start', {}).get(0)
-        if start_entry is not None:
-            ax.scatter(
-                [start_entry['extcur'][ci + 1]], [start_entry['epsilon_eff']],
-                s=100, marker='D',
-                facecolor='#333333', edgecolors='#111111',
-                linewidths=0.5, zorder=8,
-                label='Start' if ci == 0 else "",
-            )
-
-    # 合并图例
-    handles, labels = axes[0].get_legend_handles_labels()
-    # 去重
-    unique = {}
-    for h, l in zip(handles, labels):
-        if l not in unique:
-            unique[l] = h
-    legend = fig.legend(
-        list(unique.values()), list(unique.keys()),
-        title='Generation', title_fontsize=12,
-        bbox_to_anchor=(1.02, 0.5), loc='center left',
-        borderaxespad=0, handlelength=1.5, handletextpad=0.6,
-    )
-    legend.get_frame().set_linewidth(0.6)
+        if start_entry is not None and is_valid_entry(start_entry):
+            extcur = start_entry.get('extcur', [])
+            if ci < len(extcur):
+                sc = extcur[ci]
+                se = start_entry.get(best_key, float('nan'))
+                if np.isfinite(se):
+                    ax.scatter([sc], [se], s=100, marker='D',
+                              facecolor='#333333', edgecolors='#111111',
+                              linewidths=0.5, zorder=8, label='Start' if ci == 0 else "")
+    
+    fig.subplots_adjust(right=0.88, hspace=0.3, wspace=0.25)
+    
+    sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm)
+    sm.set_array([])
+    cbar = fig.colorbar(sm, ax=axes[:n_coils].tolist(), 
+                       fraction=0.02, pad=0.02)
+    cbar.set_label('Generation', fontsize=12)
+    cbar.ax.tick_params(labelsize=11)
+    cbar.outline.set_linewidth(0.8)
+    
+    # 如果有start，添加图例
+    if start_entry is not None and is_valid_entry(start_entry):
+        handles, labels = axes[0].get_legend_handles_labels()
+        if handles:
+            fig.legend(handles, labels, 
+                      loc='upper right', bbox_to_anchor=(0.98, 0.98),
+                      frameon=True, framealpha=0.85)
 
     if output:
-        fig.savefig(output)
+        fig.savefig(output, dpi=300, bbox_inches='tight')
     else:
         plt.show()
     plt.close(fig)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 5. 入口
+# 6. 入口
 # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
     log_file = 'tests/h1_optimisation/h1_optimisation_log.csv'
     data, generations, max_ind, start_data = load_optimization_log(log_file)
-    print(
-        f'Loaded {len(generations)} generation(s), '
-        f'max individual = {max_ind}'
-    )
-
+    print(f'Loaded {len(generations)} generation(s), max individual = {max_ind}')
+    
+    cmap_choice = 'viridis'
+    
     # Plot 1
     plot_generation_vs_quantity(
         data, generations, y_key='epsilon_eff',
         output='tests/h1_optimisation/ripple_generation.png',
+        cmap=cmap_choice,
     )
-    # Plot 1 变体
     plot_generation_vs_quantity(
         data, generations, y_key='iota',
         output='tests/h1_optimisation/iota_generation.png',
+        cmap=cmap_choice,
     )
 
     # Plot 2
@@ -512,16 +557,18 @@ if __name__ == '__main__':
         data, generations,
         x_key='iota', y_key='epsilon_eff',
         output='tests/h1_optimisation/iota_ripple.png',
+        cmap=cmap_choice,
     )
-    # Plot 2 变体: epsilon_eff vs Aspect ratio
     plot_quantity_vs_quantity(
         data, generations,
         x_key='Aspect ratio', y_key='epsilon_eff',
         output='tests/h1_optimisation/asp_ripple.png',
+        cmap=cmap_choice,
     )
 
-    # Plot 3: 分面散点 — 每个 coil vs ε_eff
+    # Plot 3
     plot_coils_vs_epsilon(
         data, generations,
         output='tests/h1_optimisation/coils_vs_eps.png',
+        cmap=cmap_choice,
     )
