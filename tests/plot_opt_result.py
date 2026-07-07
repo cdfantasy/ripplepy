@@ -117,45 +117,61 @@ def load_optimization_log(log_file):
     Returns
     -------
     data : dict[generation][individual] → {物理量: float, 'extcur': [...]}
-        Generation "start" contains the nominal baseline entry.
-    generations : list[int]     排好序的整数代数 (不含 "start")
+    generations : list[int]
     max_individual : int
-    start_data : dict or None   名义起始点数据 {物理量: ..., 'extcur': [...]}
+    start_data : dict or None
     """
     data = {}
     start_data = None
+    
+    def safe_float(val):
+        """安全转换，空值返回 NaN."""
+        if val is None or val == '' or val.strip() == '':
+            return float('nan')
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return float('nan')
+    
     with open(log_file, 'r') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            gen_raw = row['Generation']
-            ind = int(row['Individual'])
+            gen_raw = row.get('Generation', '')
+            ind = int(row.get('Individual', 0))
+            
             if gen_raw == 'start':
                 gen = 'start'
             else:
-                gen = int(gen_raw)
+                try:
+                    gen = int(gen_raw)
+                except ValueError:
+                    continue
+            
             if gen not in data:
                 data[gen] = {}
-            extcur_raw = row['extcur']
-            extcur = [float(x)
-                      for x in extcur_raw.strip('[]').split(',')
-                      if x.strip()]
+            
+            extcur_raw = row.get('extcur', '[]')
+            extcur = [float(x) for x in extcur_raw.strip('[]').split(',') if x.strip()]
+            
             entry = {
-                'epsilon_eff':  float(row['epsilon_eff']),
-                'iota':         float(row['iota']),
-                'volume':       float(row['volume']),
-                'Aspect ratio': float(row['Aspect ratio']),
-                'average B':    float(row['average B']),
+                'epsilon_eff':  safe_float(row.get('epsilon_eff', '')),
+                'iota':         safe_float(row.get('iota', '')),
+                'volume':       safe_float(row.get('volume', '')),
+                'Aspect ratio': safe_float(row.get('Aspect ratio', '')),
+                'average B':    safe_float(row.get('average B', '')),
                 'extcur':       extcur,
             }
             data[gen][ind] = entry
+            
             if gen == 'start':
                 start_data = entry
 
     generations = sorted([g for g in data.keys() if isinstance(g, int)])
-    max_individual = (
-        max(max(inds.keys()) for g, inds in data.items()
-            if isinstance(g, int) and inds) if generations else 0
-    )
+    max_individual = 0
+    for g, inds in data.items():
+        if isinstance(g, int) and inds:
+            max_individual = max(max_individual, max(inds.keys()))
+    
     return data, generations, max_individual, start_data
 
 
@@ -187,9 +203,11 @@ def plot_generation_vs_quantity(
     gen_list, ind_list, y_list = [], [], []
     for gen in generations:
         for ind in sorted(data[gen].keys()):
-            gen_list.append(gen)
-            ind_list.append(ind)
-            y_list.append(data[gen][ind][y_key])
+            y_val = data[gen][ind][y_key]
+            if np.isfinite(y_val):  # ✅ 过滤NaN
+                gen_list.append(gen)
+                ind_list.append(ind)
+                y_list.append(y_val)
 
     max_ind = max(ind_list) if ind_list else 0
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import multiprocessing
 
 import numpy as np
 
@@ -67,14 +68,17 @@ def main():
     nominal_extcur = np.array([50000, 5000, 0, -80000, -40000], dtype=np.float64)
 
     BOUNDS = np.array([
-        [ 50000, 0.10],    # coil 0 — ±10% 
-        [  5000, 0.10],    # coil 1 — ±10%
+        [ 50000, 0.20],    # coil 0 — ±10% 
+        [  5000, 0.20],    # coil 1 — ±10%
         [  3000, 1.0 ],    # coil 2 — ±10% (warning→nominal=1)
-        [-80000, 0.10],    # coil 3 — ±10%
-        [-40000, 0.10],    # coil 4 — ±10%
+        [-80000, 0.50],    # coil 3 — ±10%
+        [-40000, 0.50],    # coil 4 — ±10%
     ], dtype=np.float64)
 
     INITIAL_RZ = np.array([1.26, 0.0], dtype=np.float64)
+
+    n_cores = multiprocessing.cpu_count()
+    print(f"\nDetected {n_cores} CPU cores — using all for optimisation.")
 
     # ── 3.  Configure & run ──
     from ripplepy.optimize import OptimizationConfig, DifferentialEvolution
@@ -89,11 +93,11 @@ def main():
         nphi=360,
         npart=5000,
         delt_r=0.05,
-        n_pop=20,
-        max_gen=5,
+        n_pop=40,
+        max_gen=50,
         F=0.5,
         CR=0.7,
-        processes=8,
+        processes=n_cores,
         output_dir=OUTPUT_DIR,
         csv_filename="h1_optimisation_log.csv",
         device_name="H1",
