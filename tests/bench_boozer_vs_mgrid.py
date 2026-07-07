@@ -13,6 +13,7 @@ Differences isolated:
 """
 import numpy as np
 import time
+from pathlib import Path
 from simsopt.mhd import Boozer, Vmec
 from simsopt.geo import SurfaceRZFourier
 import neo
@@ -154,7 +155,7 @@ def run_benchmark(name, vmec_path, mgrid_path, extcur, nfp,
 
 # ═══════════════════════════════════════════════════════════════
 if __name__ == '__main__':
-    BASE = "/Users/zkgao/ripplepy"
+    BASE = str(Path(__file__).resolve().parent.parent)
 
     # ── CFQS ──
     run_benchmark(

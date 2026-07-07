@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Benchmark: ripplepy vs pyneo for CFQS and H1."""
 import numpy as np, time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from simsopt.mhd import Boozer, Vmec
 from simsopt.geo import SurfaceRZFourier
@@ -133,7 +134,7 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
         return py_eps, rp_new
 
 
-BASE = "/home/zkg/ripplepy"
+BASE = str(Path(__file__).resolve().parent.parent)
 
 # ═══════════════════════════════════════════════════════════════
 # NCSX
