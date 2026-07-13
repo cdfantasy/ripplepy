@@ -94,7 +94,7 @@ def _find_bmax_location(
     imax = np.argmax(B2d)
     return float(TH.ravel()[imax]), float(PH.ravel()[imax])
 
-def _sample_fieldline_fourier(
+def         _sample_fieldline_fourier(
     bmnc: NDArray[np.float64],
     rmnc: NDArray[np.float64],
     zmns: NDArray[np.float64],
@@ -107,7 +107,7 @@ def _sample_fieldline_fourier(
     """Single-pass Fourier evaluation: 9 or 12 arrays in one mode loop.
 
     Returns (B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz, *nu_vars)
-    where nu_vars = (ν, ∂ν/∂θ, ∂ν/∂ζ) if pmns is provided, else empty.
+    where nu_vars = (l, p_tb, p_pb) if pmns is provided, else empty.
     """
     npts = len(theta)
     active = np.where(
@@ -116,15 +116,15 @@ def _sample_fieldline_fourier(
     if pmns is not None:
         active = np.union1d(active, np.where(np.abs(pmns) > 0)[0])
 
-    B = np.zeros(npts, dtype=np.float64)
-    dBdt = np.zeros(npts, dtype=np.float64); dBdz = np.zeros(npts, dtype=np.float64)
-    R = np.zeros(npts, dtype=np.float64)
-    dRdt = np.zeros(npts, dtype=np.float64); dRdz = np.zeros(npts, dtype=np.float64)
-    Z = np.zeros(npts, dtype=np.float64)
-    dZdt = np.zeros(npts, dtype=np.float64); dZdz = np.zeros(npts, dtype=np.float64)
-    Nu = np.zeros(npts, dtype=np.float64) if pmns is not None else None
-    dNdt = np.zeros(npts, dtype=np.float64) if pmns is not None else None
-    dNdz = np.zeros(npts, dtype=np.float64) if pmns is not None else None
+    b = np.zeros(npts, dtype=np.float64)
+    b_tb = np.zeros(npts, dtype=np.float64); b_pb = np.zeros(npts, dtype=np.float64)
+    r = np.zeros(npts, dtype=np.float64)
+    r_tb = np.zeros(npts, dtype=np.float64); r_pb = np.zeros(npts, dtype=np.float64)
+    z = np.zeros(npts, dtype=np.float64)
+    z_tb = np.zeros(npts, dtype=np.float64); z_pb = np.zeros(npts, dtype=np.float64)
+    l = np.zeros(npts, dtype=np.float64) if pmns is not None else None
+    p_tb = np.zeros(npts, dtype=np.float64) if pmns is not None else None
+    p_pb = np.zeros(npts, dtype=np.float64) if pmns is not None else None
 
     for m in active:
         xm_m = float(xm[m]); xn_n = float(xn[m])
@@ -133,32 +133,32 @@ def _sample_fieldline_fourier(
 
         bc = bmnc[m]
         if bc != 0.0:
-            B    += bc * cos_a
-            dBdt += -xm_m * bc * sin_a
-            dBdz +=  xn_n * bc * sin_a
+            b    += bc * cos_a
+            b_tb += -xm_m * bc * sin_a
+            b_pb +=  xn_n * bc * sin_a
 
-        rc = rmnc[m]
-        if rc != 0.0:
-            R    += rc * cos_a
-            dRdt += -xm_m * rc * sin_a
-            dRdz +=  xn_n * rc * sin_a
+        ri = rmnc[m]
+        if ri != 0.0:
+            r    += ri * cos_a
+            r_tb += -xm_m * ri * sin_a
+            r_pb +=  xn_n * ri * sin_a
 
-        zc = zmns[m]
-        if zc != 0.0:
-            Z    += zc * sin_a
-            dZdt +=  xm_m * zc * cos_a
-            dZdz += -xn_n * zc * cos_a
+        zi = zmns[m]
+        if zi != 0.0:
+            z    += zi * sin_a
+            z_tb +=  xm_m * zi * cos_a
+            z_pb += -xn_n * zi * cos_a
 
         if pmns is not None:
-            pc = pmns[m]
-            if pc != 0.0:
-                Nu   += pc * sin_a
-                dNdt +=  xm_m * pc * cos_a
-                dNdz += -xn_n * pc * cos_a
+            li = pmns[m]
+            if li != 0.0:
+                l    += li * sin_a
+                p_tb += -xm_m * li * cos_a    # p_tb = -m*li*cosv
+                p_pb +=  xn_n * li * cos_a    # p_pb = +n*li*cosv
 
     if pmns is not None:
-        return B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz, Nu, dNdt, dNdz
-    return B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz
+        return b, b_tb, b_pb, r, r_tb, r_pb, z, z_tb, z_pb, l, p_tb, p_pb
+    return b, b_tb, b_pb, r, r_tb, r_pb, z, z_tb, z_pb
 
 
 def sample_fieldline_from_boozer(
@@ -193,26 +193,28 @@ def sample_fieldline_from_boozer(
 
     result = _sample_fieldline_fourier(bmnc, rmnc, zmns, xm, xn, theta, zeta, pmns=pmns)
     if pmns is not None:
-        B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz, Nu, dNdt, dNdz = result
+        b, b_tb, b_pb, r, r_tb, r_pb, z, z_tb, z_pb, l, p_tb, p_pb = result
     else:
-        B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz = result
-        Nu = dNdt = dNdz = np.zeros_like(B)
+        b, b_tb, b_pb, r, r_tb, r_pb, z, z_tb, z_pb = result
+        l = p_tb = p_pb = np.zeros_like(b)
 
-    # --- metric: g_ij including ν terms (neo_fourier.f90:174-178) ---
-    # g_θθ  = (∂R/∂θ)² + (∂Z/∂θ)² + R²(∂ν/∂θ)²
-    # g_ζζ  = (∂R/∂ζ)² + (∂Z/∂ζ)² + R²(1+∂ν/∂ζ)²
-    # g_θζ  = (∂R/∂θ)(∂R/∂ζ) + (∂Z/∂θ)(∂Z/∂ζ) + R²(∂ν/∂θ)(1+∂ν/∂ζ)
-    gtb  = dRdt**2 + dZdt**2 + R**2 * dNdt**2
-    gpb  = dRdz**2 + dZdz**2 + R**2 * (1.0 + dNdz)**2
-    gtbp = dRdt*dRdz + dZdt*dZdz + R**2 * dNdt * (1.0 + dNdz)
+    # ── neo_fourier.f90:138-139:  p_tb = p_tb * twopi/nfp,  p_pb = ONE + p_pb * twopi/nfp ──
+    p_tb = p_tb * (2.0 * np.pi / nfp)
+    p_pb = 1.0 + p_pb * (2.0 * np.pi / nfp)
+
+    # --- metric: g_ij (neo_fourier.f90:173-175) ---
+    gtbtb = r_tb*r_tb + z_tb*z_tb + r*r * p_tb*p_tb
+    gpbpb = r_pb*r_pb + z_pb*z_pb + r*r * p_pb*p_pb
+    gtbpb = r_tb*r_pb + z_tb*z_pb + r*r * p_tb*p_pb
 
     fac = I_ + iota * J_
-    sqrg11 = np.sqrt(np.abs(gtb * gpb - gtbp**2)) * B**2 / fac
-    kg_gradpsi = (J_ * dBdz - I_ * dBdt) / fac
-    pard = dBdz + iota * dBdt
+    isqrg  = b*b / fac
+    sqrg11 = np.sqrt(np.abs(gtbtb*gpbpb - gtbpb*gtbpb)) * isqrg
+    kg = (J_*b_pb - I_*b_tb) / fac
+    pard = b_pb + iota * b_tb
 
     return FieldLineData(
-        zeta=zeta, B=B, gradpsi=sqrg11, kg_gradpsi=kg_gradpsi,
+        zeta=zeta, B=b, gradpsi=sqrg11, kg_gradpsi=kg,
         pard=pard, iota=iota, I_val=I_, J_val=J_, nfp=nfp,
     )
 

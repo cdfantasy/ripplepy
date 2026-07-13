@@ -40,7 +40,7 @@ NTURN = 200
 NPHI = 360
 NPART = 5000
 NPART_PY = 500
-COMPARE_PYTHON = False            # True → also run Python η-state-machine + diagnostics
+COMPARE_PYTHON = True            # True → also run Python η-state-machine + diagnostics
 CACHE_FIELDLINE = False
 CACHE_DIR = Path(__file__).resolve().parent / "fieldline_cache"
 
@@ -78,13 +78,16 @@ def build_fieldline_from_boozer(booz_dict, surf_idx, theta0, nzeta, nturn, phi0=
     else:
         B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz = result
         Nu = dNdt = dNdz = np.zeros_like(B)
+    nfp = int(booz_dict.get('nfp_b', booz_dict.get('nfp', 1)))
+    dNdt_nrm = dNdt * (2.0 * np.pi / nfp)
+    dNdz_nrm = 1.0 + dNdz * (2.0 * np.pi / nfp)
 
     I_ = float(booz_dict["bvco_b"].flat[surf_idx])  # curr_pol
     J_ = float(booz_dict["buco_b"].flat[surf_idx])  # curr_tor
     fac = I_ + iota * J_
-    gtb  = dRdt**2 + dZdt**2 + R**2 * dNdt**2
-    gpb  = dRdz**2 + dZdz**2 + R**2 * (1.0 + dNdz)**2
-    gtbp = dRdt*dRdz + dZdt*dZdz + R**2 * dNdt * (1.0 + dNdz)
+    gtb  = dRdt**2 + dZdt**2 + R**2 * dNdt_nrm**2
+    gpb  = dRdz**2 + dZdz**2 + R**2 * dNdz_nrm**2
+    gtbp = dRdt*dRdz + dZdt*dZdz + R**2 * dNdt_nrm * dNdz_nrm
     sqrg11 = np.sqrt(np.abs(gtb * gpb - gtbp**2)) * B**2 / fac
     kg_gradpsi = (J_ * dBdz - I_ * dBdt) / fac
     kappa_g = kg_gradpsi / np.maximum(sqrg11, 1e-15)

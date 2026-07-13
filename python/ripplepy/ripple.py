@@ -78,7 +78,7 @@ def get_bfield_matrix(extcur, r, z, phi):
     phi_arr = np.atleast_1d(phi).astype(np.float64)
     if not (len(r_arr) == len(z_arr) == len(phi_arr)):
         raise ValueError("r, z, phi arrays must have same length")
-    results = np.zeros((len(r_arr), 12), dtype=np.float64)
+    results = np.zeros((len(r_arr), 13), dtype=np.float64)
     for i in range(len(r_arr)):
         results[i, :] = Effective_Ripple.interpolate_field(r_arr[i], z_arr[i], phi_arr[i])
     return results
