@@ -1,35 +1,21 @@
-"""
-Boozer-coordinate ε_eff verification.
+#!/usr/bin/env python3
+"""Compute ε_eff^(3/2) from Boozer Fourier harmonics using pure Python.
 
-Uses the EXACT same integrands as pyneo (rhs_bo1.f90) evaluated analytically
-from Boozer Fourier harmonics — zero interpolation error.
-
-The bp-integration algorithm matches ripplepy's approach:
-  - B-profile scan over bp ∈ [B_min/B₀, 1]
-  - Local-minimum-based well detection  (find_local_minima)
-  - Per-segment H/I accumulation        (integrate_bounce_segment)
-
-This isolates the integration algorithm from magnetic-field representation.
-
-Two bp-integration modes:
-  - rectangular (n_b uniform points, same as active ripplepy)
-  - Gauss-Legendre quadrature
-
-Formula (matching pyneo's flint_bo):
-  ε_{eff}^{3/2} = (π R₀² Δη) / (8√2) · Σ_{bp} H²/I  ·  (∫dζ/B²) / (∫dζ/B² |∇ψ|)²
+Two algorithms are provided:
+  - ``eps_eff_pyneo_style``: η-particle state machine (matches pyneo's flint_bo + rhs_bo1)
+  - ``eps_eff_from_boozer``: bp-scanning (matches ripplepy Fortran backend)
 """
 
 from __future__ import annotations
 
+import dataclasses
+from typing import Any, Dict, List, Optional, Tuple
+
 import numpy as np
 from numpy.typing import NDArray
-from typing import Dict, Optional, Tuple, Any
-from numpy.typing import NDArray
-import dataclasses
-
 
 # ═══════════════════════════════════════════════════════════════════════
-# 1.  Direct Fourier evaluation along analytic field line  θ(ζ)=θ₀+ιζ
+# 1.  Fast Fourier evaluation along a field line
 # ═══════════════════════════════════════════════════════════════════════
 
 def _fourier_sum_cos(
@@ -39,34 +25,9 @@ def _fourier_sum_cos(
     theta: NDArray[np.float64],
     zeta: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    """Σ coeff[m] cos(xm[m]*θ - xn[m]*ζ)  at every (θ,ζ) point (same length)."""
-    arg = np.outer(xm, theta) - np.outer(xn, zeta)          # (nmodes, npoints)
+    """Σ coeff cos(xm θ - xn ζ)"""
+    arg = np.outer(xm, theta) - np.outer(xn, zeta)
     return np.dot(coeff, np.cos(arg))
-
-
-def _fourier_sum_deriv_theta_cos(
-    coeff: NDArray[np.float64],
-    xm: NDArray[np.int32],
-    xn: NDArray[np.int32],
-    theta: NDArray[np.float64],
-    zeta: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """∂/∂θ: Σ -xm·coeff sin(xm θ - xn ζ)"""
-    arg = np.outer(xm, theta) - np.outer(xn, zeta)
-    return np.dot(-xm.astype(np.float64) * coeff, np.sin(arg))
-
-
-def _fourier_sum_deriv_zeta_cos(
-    coeff: NDArray[np.float64],
-    xm: NDArray[np.int32],
-    xn: NDArray[np.int32],
-    theta: NDArray[np.float64],
-    zeta: NDArray[np.float64],
-) -> NDArray[np.float64]:
-    """∂/∂ζ: Σ +xn·coeff sin(xm θ - xn ζ)"""
-    arg = np.outer(xm, theta) - np.outer(xn, zeta)
-    return np.dot(+xn.astype(np.float64) * coeff, np.sin(arg))
-
 
 def _fourier_sum_sin(
     coeff: NDArray[np.float64],
@@ -75,12 +36,11 @@ def _fourier_sum_sin(
     theta: NDArray[np.float64],
     zeta: NDArray[np.float64],
 ) -> NDArray[np.float64]:
-    """Σ coeff[m] sin(xm[m]*θ - xn[m]*ζ)"""
+    """Σ coeff sin(xm θ - xn ζ)"""
     arg = np.outer(xm, theta) - np.outer(xn, zeta)
     return np.dot(coeff, np.sin(arg))
 
-
-def _fourier_sum_deriv_theta_sin(
+def _fourier_sum_deriv_theta_cos(
     coeff: NDArray[np.float64],
     xm: NDArray[np.int32],
     xn: NDArray[np.int32],
@@ -90,7 +50,6 @@ def _fourier_sum_deriv_theta_sin(
     """∂/∂θ: Σ +xm·coeff cos(xm θ - xn ζ)"""
     arg = np.outer(xm, theta) - np.outer(xn, zeta)
     return np.dot(+xm.astype(np.float64) * coeff, np.cos(arg))
-
 
 def _fourier_sum_deriv_zeta_sin(
     coeff: NDArray[np.float64],
@@ -102,7 +61,6 @@ def _fourier_sum_deriv_zeta_sin(
     """∂/∂ζ: Σ -xn·coeff cos(xm θ - xn ζ)"""
     arg = np.outer(xm, theta) - np.outer(xn, zeta)
     return np.dot(-xn.astype(np.float64) * coeff, np.sin(arg))
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 2.  Field-line sampling with analytic Fourier evaluation
@@ -117,10 +75,9 @@ class FieldLineData:
     kg_gradpsi: NDArray[np.float64]   # |∇ψ|·κ_G  (geodcu in pyneo)
     pard: NDArray[np.float64]         # ∂|B|/∂ζ + ι·∂|B|/∂θ  (along field line)
     iota: float
-    I_val: float                      # buco = curr_pol
-    J_val: float                      # bvco = curr_tor
+    I_val: float                      # bvco = curr_pol
+    J_val: float                      # buco = curr_tor
     nfp: int
-
 
 def _find_bmax_location(
     bmnc: NDArray[np.float64],
@@ -137,7 +94,6 @@ def _find_bmax_location(
     imax = np.argmax(B2d)
     return float(TH.ravel()[imax]), float(PH.ravel()[imax])
 
-
 def _sample_fieldline_fourier(
     bmnc: NDArray[np.float64],
     rmnc: NDArray[np.float64],
@@ -146,18 +102,19 @@ def _sample_fieldline_fourier(
     xn: NDArray[np.int32],
     theta: NDArray[np.float64],
     zeta: NDArray[np.float64],
+    pmns: Optional[NDArray[np.float64]] = None,
 ) -> tuple:
-    """Single-pass Fourier evaluation: all 9 arrays in one mode loop.
+    """Single-pass Fourier evaluation: 9 or 12 arrays in one mode loop.
 
-    Avoids np.outer intermediates by iterating over active modes and
-    accumulating into pre-allocated output arrays.  20-50× faster than
-    the 9 separate _fourier_sum_* calls.
+    Returns (B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz, *nu_vars)
+    where nu_vars = (ν, ∂ν/∂θ, ∂ν/∂ζ) if pmns is provided, else empty.
     """
     npts = len(theta)
-    # Identify modes with at least one non-zero coefficient
     active = np.where(
         (np.abs(bmnc) > 0) | (np.abs(rmnc) > 0) | (np.abs(zmns) > 0)
     )[0]
+    if pmns is not None:
+        active = np.union1d(active, np.where(np.abs(pmns) > 0)[0])
 
     B = np.zeros(npts, dtype=np.float64)
     dBdt = np.zeros(npts, dtype=np.float64); dBdz = np.zeros(npts, dtype=np.float64)
@@ -165,6 +122,9 @@ def _sample_fieldline_fourier(
     dRdt = np.zeros(npts, dtype=np.float64); dRdz = np.zeros(npts, dtype=np.float64)
     Z = np.zeros(npts, dtype=np.float64)
     dZdt = np.zeros(npts, dtype=np.float64); dZdz = np.zeros(npts, dtype=np.float64)
+    Nu = np.zeros(npts, dtype=np.float64) if pmns is not None else None
+    dNdt = np.zeros(npts, dtype=np.float64) if pmns is not None else None
+    dNdz = np.zeros(npts, dtype=np.float64) if pmns is not None else None
 
     for m in active:
         xm_m = float(xm[m]); xn_n = float(xn[m])
@@ -189,6 +149,15 @@ def _sample_fieldline_fourier(
             dZdt +=  xm_m * zc * cos_a
             dZdz += -xn_n * zc * cos_a
 
+        if pmns is not None:
+            pc = pmns[m]
+            if pc != 0.0:
+                Nu   += pc * sin_a
+                dNdt +=  xm_m * pc * cos_a
+                dNdz += -xn_n * pc * cos_a
+
+    if pmns is not None:
+        return B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz, Nu, dNdt, dNdz
     return B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz
 
 
@@ -199,65 +168,48 @@ def sample_fieldline_from_boozer(
     nzeta: int = 1024,
     nturn: int = 64,
 ) -> FieldLineData:
-    """
-    Sample a single field line θ(ζ)=θ₀+ιζ by direct Fourier summation
-    at every ζ point.  No grid, no interpolation.
-
-    Parameters
-    ----------
-    booz : dict
-        Keys: bmnc_b, rmnc_b, zmns_b, ixm_b, ixn_b, iota_b, buco_b, bvco_b, nfp_b.
-        Arrays are (ns, mnmax) or (ns,) for profiles.
-    surf_idx : int
-        Zero-based flux-surface index.
-    theta0 : float
-        Initial poloidal angle.
-    nzeta : int
-        Number of ζ (=φ) points per toroidal turn.
-    nturn : int
-        Number of field periods (2π in ζ) to trace.
-    """
-    # --- extract surface data ---
+    """Sample a single field line θ(ζ)=θ₀+ιζ by direct Fourier summation."""
     xm = np.asarray(booz["ixm_b"], dtype=np.int32)
     xn = np.asarray(booz["ixn_b"], dtype=np.int32)
-
     bmnc = np.asarray(booz["bmnc_b"][surf_idx, :], dtype=np.float64)
     rmnc = np.asarray(booz["rmnc_b"][surf_idx, :], dtype=np.float64)
     zmns = np.asarray(booz["zmns_b"][surf_idx, :], dtype=np.float64)
+    pmns = booz.get("pmns_b", None)
+    if pmns is not None:
+        pmns = np.asarray(pmns[surf_idx, :], dtype=np.float64)
 
     iota = float(np.asarray(booz["iota_b"]).flat[surf_idx])
-    I_   = float(np.asarray(booz["buco_b"]).flat[surf_idx])
-    J_   = float(np.asarray(booz["bvco_b"]).flat[surf_idx])
+    I_   = float(np.asarray(booz["bvco_b"]).flat[surf_idx])
+    J_   = float(np.asarray(booz["buco_b"]).flat[surf_idx])
     nfp  = int(np.asarray(booz.get("nfp_b", booz.get("nfp", 1))).flat[0])
 
-    # --- auto-detect B_max location as starting point (matching pyneo) ---
     if theta0 is None:
         theta0, phi0_bmax = _find_bmax_location(bmnc, xm, xn)
 
-    # --- field-line sampling ---
     ntot = nzeta * nturn
     dphi = 2.0 * np.pi / nzeta
     zeta = np.arange(ntot, dtype=np.float64) * dphi
-    theta = theta0 + iota * zeta
+    theta = theta0 + iota * (zeta - phi0_bmax)
 
-    # --- Fourier evaluation (single-pass, all 9 arrays) ---
-    B, dBdtheta, dBdzeta, R, dRdtheta, dRdzeta, Z, dZdtheta, dZdzeta = (
-        _sample_fieldline_fourier(bmnc, rmnc, zmns, xm, xn, theta, zeta))
+    result = _sample_fieldline_fourier(bmnc, rmnc, zmns, xm, xn, theta, zeta, pmns=pmns)
+    if pmns is not None:
+        B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz, Nu, dNdt, dNdz = result
+    else:
+        B, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz = result
+        Nu = dNdt = dNdz = np.zeros_like(B)
 
-    # --- metric: g_ij on the flux surface (neo_fourier.f90:174-181) ---
-    gtb  = dRdtheta**2 + dZdtheta**2                      # g_θθ
-    gpb  = dRdzeta**2  + dZdzeta**2  + R**2               # g_ζζ
-    gtbp = dRdtheta * dRdzeta + dZdtheta * dZdzeta        # g_θζ
+    # --- metric: g_ij including ν terms (neo_fourier.f90:174-178) ---
+    # g_θθ  = (∂R/∂θ)² + (∂Z/∂θ)² + R²(∂ν/∂θ)²
+    # g_ζζ  = (∂R/∂ζ)² + (∂Z/∂ζ)² + R²(1+∂ν/∂ζ)²
+    # g_θζ  = (∂R/∂θ)(∂R/∂ζ) + (∂Z/∂θ)(∂Z/∂ζ) + R²(∂ν/∂θ)(1+∂ν/∂ζ)
+    gtb  = dRdt**2 + dZdt**2 + R**2 * dNdt**2
+    gpb  = dRdz**2 + dZdz**2 + R**2 * (1.0 + dNdz)**2
+    gtbp = dRdt*dRdz + dZdt*dZdz + R**2 * dNdt * (1.0 + dNdz)
 
     fac = I_ + iota * J_
-    isqrg = B**2 / fac                                     # 1 / √g
-    sqrg11 = np.sqrt(np.abs(gtb * gpb - gtbp**2)) * isqrg # |∇ψ|
-
-    # --- |∇ψ| κ_G  (neo_fourier.f90:183) ---
-    kg_gradpsi = (J_ * dBdzeta - I_ * dBdtheta) / fac
-
-    # --- parallel derivative of |B| (for well boundary detection) ---
-    pard = dBdzeta + iota * dBdtheta
+    sqrg11 = np.sqrt(np.abs(gtb * gpb - gtbp**2)) * B**2 / fac
+    kg_gradpsi = (J_ * dBdz - I_ * dBdt) / fac
+    pard = dBdz + iota * dBdt
 
     return FieldLineData(
         zeta=zeta, B=B, gradpsi=sqrg11, kg_gradpsi=kg_gradpsi,
@@ -266,7 +218,7 @@ def sample_fieldline_from_boozer(
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# 3.  Well detection & bounce-segment integration (ripplepy algorithm)
+# 3.  Well detection & bounce-segment integration
 # ═══════════════════════════════════════════════════════════════════════
 
 def _find_local_minima(B: NDArray[np.float64]) -> NDArray[np.int32]:
@@ -281,24 +233,14 @@ def _find_local_minima(B: NDArray[np.float64]) -> NDArray[np.int32]:
     idx = np.array(minima, dtype=np.int32)
     return np.concatenate([idx, [idx[0] + n]])
 
-
 def _integrate_bounce_segment(
-    bp: float,
-    b0: float,
-    i1: int,
-    i2: int,
+    bp: float, b0: float, i1: int, i2: int,
     B: NDArray[np.float64],
     gradpsi: NDArray[np.float64],
     kg_gradpsi: NDArray[np.float64],
     dmeasure: NDArray[np.float64],
 ) -> Tuple[float, float]:
-    """
-    Integrate H and I over one bounce well [i1, i2) for a given bp.
-    Uses pyneo's EXACT integrands from rhs_bo1.f90.
-
-    H integrand:  √(bp-B/B₀)/B² · (4B₀/B - 1/bp) · (|∇ψ|κ_G) / bp
-    I integrand:  √(bp-B/B₀) / (B²·√bp)
-    """
+    """Integrate H and I over one bounce well [i1, i2) for a given bp."""
     n = len(B)
     H, I_val = 0.0, 0.0
     for k in range(i1, i2):
@@ -306,28 +248,16 @@ def _integrate_bounce_segment(
         b_loc = B[idx] / b0
         if bp <= b_loc:
             continue
-
         sqrt_term = np.sqrt(bp - b_loc)
         inv_B2 = 1.0 / B[idx]**2
-
-        # I integrand  (rhs_bo1:  p_i  = sqrt(1-bra/eta) * 1/B²)
-        #   sqrt(1-bra/eta) = sqrt((bp-b_loc)/bp) = sqrt(bp-b_loc)/√bp
         dI = sqrt_term * inv_B2 / np.sqrt(bp)
         I_val += dI * dmeasure[idx]
-
-        # H integrand (rhs_bo1:  p_h = p_i * (4/bra-1/eta) * geodcu/√eta)
-        #   = sqrt(bp-b_loc)/(B²√bp) * (4B₀/B-1/bp) * |∇ψ|κ_G / √bp
-        #   = sqrt(bp-b_loc)/B² * (4B₀/B-1/bp) * |∇ψ|κ_G / bp
-        #   ≠ dI * (4/b_loc-1/bp) * kg / bp   (which has an extra 1/√bp)
         dH = sqrt_term * inv_B2 * (4.0 / b_loc - 1.0 / bp) * kg_gradpsi[idx] / bp
         H += dH * dmeasure[idx]
-
     return H, I_val
 
-
 def _compute_H2_over_I_for_bp(
-    bp: float,
-    b0: float,
+    bp: float, b0: float,
     B: NDArray[np.float64],
     gradpsi: NDArray[np.float64],
     kg_gradpsi: NDArray[np.float64],
@@ -339,12 +269,10 @@ def _compute_H2_over_I_for_bp(
     for k in range(len(minima) - 1):
         i1, i2 = minima[k], minima[k + 1]
         Hk, Ik = _integrate_bounce_segment(
-            bp, b0, i1, i2, B, gradpsi, kg_gradpsi, dmeasure
-        )
+            bp, b0, i1, i2, B, gradpsi, kg_gradpsi, dmeasure)
         if Ik > 1e-15:
             total += Hk * Hk / Ik
     return total
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # 4.  Main computation
@@ -361,87 +289,52 @@ def eps_eff_from_boozer(
     n_gauss: int = 64,
     return_debug: bool = False,
 ) -> Dict[str, Any]:
-    """
-    ε_eff^(3/2) using ripplepy's B-profile-scan algorithm, evaluated
-    analytically from Boozer Fourier coefficients.
-
-    Uses the SAME conventions as pyneo by default:
-      - starts from B_max location (theta0=None → auto-detected)
-      - returns ε^(3/2) = π·rt0²/(8√2) · e1 · e2/e3²
-      where rt0 is the m=n=0 rmnc coefficient for the flux surface.
-
-    Returns dict with keys:
-      eps_eff_32, eps_eff, e1, e2, e3, rt0_squared, ...
-    """
-    # --- sample field line (auto-detect B_max start) ---
+    """ε_eff^(3/2) using ripplepy's B-profile-scan algorithm."""
     fl = sample_fieldline_from_boozer(booz, surf_idx, theta0, nzeta, nturn)
-
-    B = fl.B
-    gp = fl.gradpsi
-    kg = fl.kg_gradpsi
+    B = fl.B; gp = fl.gradpsi; kg = fl.kg_gradpsi
     npts = len(B)
     dphi = 2.0 * np.pi / nzeta
-    dmeasure = np.full(npts, dphi)           # uniform dζ
-
+    dmeasure = np.full(npts, dphi)
     b0 = np.max(B)
     bmin, bmax = np.min(B), b0
 
-    # --- denominator integrals (pyneo convention: y2=∫1/B² dζ, y3=∫|∇ψ|/B² dζ) ---
     e2 = np.sum(dmeasure / B**2)
     e3 = np.sum(dmeasure * gp / B**2)
 
-    # --- bp integration ---
     if use_gauss:
         from numpy.polynomial.legendre import leggauss
-        nodes, weights = leggauss(n_gauss)          # on [-1, 1]
+        nodes, weights = leggauss(n_gauss)
         bp_min, bp_max = bmin / b0, 1.0
         e1 = 0.0
         for node, wgt in zip(nodes, weights):
-            bp = 0.5 * (bp_max + bp_min) + 0.5 * (bp_max - bp_min) * node
-            e1 += _compute_H2_over_I_for_bp(
-                bp, b0, B, gp, kg, dmeasure
-            ) * wgt * 0.5 * (bp_max - bp_min)
+            bp = 0.5*(bp_max+bp_min) + 0.5*(bp_max-bp_min)*node
+            e1 += _compute_H2_over_I_for_bp(bp,b0,B,gp,kg,dmeasure)*wgt*0.5*(bp_max-bp_min)
     else:
         dbp = (bmax - bmin) / (n_b - 1) / b0
         e1 = 0.0
         for j in range(n_b):
-            bp = bmin / b0 + j * dbp
-            e1 += _compute_H2_over_I_for_bp(
-                bp, b0, B, gp, kg, dmeasure
-            ) * dbp
+            bp = bmin/b0 + j*dbp
+            e1 += _compute_H2_over_I_for_bp(bp,b0,B,gp,kg,dmeasure)
 
-    # --- rt0² for scaling (matching pyneo's coeps convention) ---
     xm = np.asarray(booz["ixm_b"], dtype=np.int32)
     xn = np.asarray(booz["ixn_b"], dtype=np.int32)
-    rmnc = np.asarray(booz["rmnc_b"][surf_idx, :], dtype=np.float64)
+    rmnc = np.asarray(booz["rmnc_b"][surf_idx,:], dtype=np.float64)
     m0 = np.where((xm == 0) & (xn == 0))[0]
     rt0 = float(rmnc[m0[0]]) if len(m0) > 0 else 1.0
     rt0_sq = rt0**2
 
-    # --- final formula with rt0² scaling (matching pyneo convention) ---
     eps_eff_32 = np.pi * rt0_sq / (8.0 * np.sqrt(2.0)) * e1 * e2 / e3**2
     eps_eff = eps_eff_32 ** (2.0 / 3.0)
 
-    result: Dict[str, Any] = {
-        "eps_eff_32": float(eps_eff_32),
-        "eps_eff": float(eps_eff),
-        "e1": float(e1), "e2": float(e2), "e3": float(e3),
-        "iota": fl.iota, "b0": float(b0),
-        "bmin": float(bmin), "bmax": float(bmax),
-        "rt0_squared": float(rt0_sq),
-    }
-
+    result = {"eps_eff_32": float(eps_eff_32), "eps_eff": float(eps_eff),
+              "e1": float(e1), "e2": float(e2), "e3": float(e3),
+              "rt0_squared": float(rt0_sq)}
     if return_debug:
-        result["B_along"] = B
-        result["gradpsi_along"] = gp
-        result["kg_gradpsi_along"] = kg
-        result["zeta"] = fl.zeta
-
+        result["B"] = B; result["gp"] = gp; result["kg"] = kg
     return result
 
-
 # ═══════════════════════════════════════════════════════════════════════
-# 4b.  pyneo-style state-machine integration (η-particle parallel accumulation)
+# 5.  pyneo-compatible state machine (matches pyneo's flint_bo + rhs_bo1)
 # ═══════════════════════════════════════════════════════════════════════
 
 def eps_eff_pyneo_style(
@@ -453,284 +346,114 @@ def eps_eff_pyneo_style(
     npart: int = 100,
     multra: int = 1,
 ) -> Dict[str, Any]:
-    """ε_eff^(3/2) matching pyneo's flint_bo + rhs_bo1 algorithm exactly.
-
-    Uses the analytic Boozer field line θ(ζ)=θ₀+ιζ (no RK4 sub-stepping),
-    but replicates pyneo's state machine: well boundary detection via
-    parallel derivative of |B|, ipass counting of B-minima crossings inside
-    each well, and the identical H/I integral formulas.
-
-    Returns
-    -------
-    dict with keys: eps_eff_32, eps_eff, e2, e3, bigint, iota, b0, bmin, bmax, rt0_squared
-    """
-    # ── sample field line ──
+    """ε_eff^(3/2) matching pyneo's flint_bo + rhs_bo1 algorithm exactly."""
     fl = sample_fieldline_from_boozer(booz, surf_idx, theta0, nzeta, nturn)
-
-    B = fl.B
-    gp = fl.gradpsi        # |∇ψ|
-    kg = fl.kg_gradpsi     # |∇ψ|·κ_G   (pyneo's "geodcu")
-    pard = fl.pard         # ∂|B|/∂ζ + ι·∂|B|/∂θ
+    B = fl.B; gp = fl.gradpsi; kg = fl.kg_gradpsi; pard = fl.pard
     npts = len(B)
     dphi = 2.0 * np.pi / nzeta
+    b0 = np.max(B); bmin = np.min(B)
 
-    b0 = np.max(B)
-    bmin = np.min(B)
-
-    # ── denominator integrals (y2, y3 in pyneo) ──
     inv_B2 = 1.0 / B**2
-    e2 = np.sum(inv_B2) * dphi          # y2 = ∫ dφ / B²
-    e3 = np.sum(inv_B2 * gp) * dphi     # y3 = ∫ dφ |∇ψ| / B²
+    e2 = np.sum(inv_B2) * dphi
+    e3 = np.sum(inv_B2 * gp) * dphi
 
-    # ── η values: etamin + heta/2 offset (pyneo flint_bo:131-134) ──
     etamin = bmin / b0
     heta = (1.0 - etamin) / (npart - 1)
     eta_vals = etamin + heta / 2.0 + np.arange(npart) * heta
 
-    # ── rt0² ──
     xm = np.asarray(booz["ixm_b"], dtype=np.int32)
     xn = np.asarray(booz["ixn_b"], dtype=np.int32)
-    rmnc = np.asarray(booz["rmnc_b"][surf_idx, :], dtype=np.float64)
+    rmnc = np.asarray(booz["rmnc_b"][surf_idx,:], dtype=np.float64)
     m0 = np.where((xm == 0) & (xn == 0))[0]
     rt0 = float(rmnc[m0[0]]) if len(m0) > 0 else 1.0
     rt0_sq = rt0**2
-
-    # ── coeps factor (pyneo flint_bo:135) ──
     coeps = np.pi * rt0_sq * heta / (8.0 * np.sqrt(2.0))
 
-    # ── Precompute per-point arrays ──
-    bra_arr = B / b0                             # B/B₀  (pyneo: bra)
-    invB2_arr = inv_B2                           # 1/B²  (pyneo: bmodm2)
-    kg_arr = kg                                  # |∇ψ|·κ_G
-    sqrt_eta_cache = np.sqrt(eta_vals)            # √η per η
-
-    # ── per-η state machine (pyneo flint_bo + rhs_bo1) ──
+    bra_arr = B / b0; invB2_arr = inv_B2; kg_arr = kg
+    sqrt_eta_cache = np.sqrt(eta_vals)
     bigint_total = 0.0
 
     for i_eta, eta in enumerate(eta_vals):
-        sqeta = sqrt_eta_cache[i_eta]            # √η
-        isw = 0                                  # 0=free, 1=in_well, 2=just_exited
-        iswst = 0                                # skip-first-bounce sentinel
-        icount = 0
-        ipa = 0
-        H_acc = 0.0
-        I_acc = 0.0
-        pard0 = pard[0]                          # initial parallel derivative
+        sqeta = sqrt_eta_cache[i_eta]
+        isw = 0; iswst = 0; icount = 0; ipa = 0
+        H_acc = 0.0; I_acc = 0.0; pard0 = pard[0]
 
         for k in range(npts):
-            bra = bra_arr[k]
-            subsq = 1.0 - bra / eta              # >0 → trapped
-
-            # ── ipass: did we cross a B-minimum? (pyneo rhs_bo1:44-48) ──
-            # ipass=1 when pard0 ≤ 0 and pard > 0 (B goes from decreasing
-            # to increasing = B-minimum crossing)
-            if pard0 <= 0.0 and pard[k] > 0.0:
-                ipass = 1
-            else:
-                ipass = 0
-
+            bra = bra_arr[k]; subsq = 1.0 - bra / eta
+            if pard0 <= 0.0 and pard[k] > 0.0: ipass = 1
+            else: ipass = 0
             if subsq > 0.0:
-                # ── INSIDE WELL ──
-                isw = 1
-                icount += 1
-                ipa += ipass
-
-                # pyneo rhs_bo1:64-66
-                # sq = sqrt(subsq) / B²
-                # p_i = sq
-                # p_h = sq * (4/bra - 1/η) * geodcu / √η
+                isw = 1; icount += 1; ipa += ipass
                 sq = np.sqrt(subsq) * invB2_arr[k]
                 I_acc += sq * dphi
                 H_acc += sq * (4.0 / bra - 1.0 / eta) * kg_arr[k] / sqeta * dphi
-
             else:
-                # ── OUTSIDE WELL ──
-                if isw == 1:
-                    isw = 2     # just exited → settle on next check
-
-            # ── Settle well (pyneo flint_bo:183-203) ──
+                if isw == 1: isw = 2
             if isw == 2:
                 if I_acc > 1.0e-15:
-                    # m_cl = max(1, min(multra, ipa)) — trapping class
-                    bigint_total += H_acc * H_acc / I_acc * iswst
-                # reset for next well
-                iswst = 1
-                H_acc = 0.0
-                I_acc = 0.0
-                icount = 0
-                ipa = 0
-                isw = 0
-
+                    bigint_total += H_acc*H_acc/I_acc * iswst
+                iswst = 1; H_acc = 0.0; I_acc = 0.0; icount = 0; ipa = 0; isw = 0
             pard0 = pard[k]
 
-        # ── End-of-trace: particle still in well (pyneo handles this implicitly
-        #     since RK4 always ends at a field-period boundary = B_max) ──
-
-    # ── Final formula (pyneo flint_bo:426-429) ──
     eps_eff_32 = coeps * bigint_total * e2 / e3**2
     eps_eff = eps_eff_32 ** (2.0 / 3.0)
-
     return {
-        "eps_eff_32": float(eps_eff_32),
-        "eps_eff": float(eps_eff),
-        "e2": float(e2),
-        "e3": float(e3),
-        "bigint_total": float(bigint_total),
-        "heta": float(heta),
-        "iota": fl.iota,
-        "b0": float(b0),
-        "bmin": float(bmin),
-        "bmax": float(b0),
+        "eps_eff_32": float(eps_eff_32), "eps_eff": float(eps_eff),
+        "e2": float(e2), "e3": float(e3), "bigint_total": float(bigint_total),
+        "heta": float(heta), "iota": fl.iota,
+        "b0": float(b0), "bmin": float(bmin), "bmax": float(b0),
         "rt0_squared": float(rt0_sq),
     }
 
-
 # ═══════════════════════════════════════════════════════════════════════
-# 5.  pyneo-compatible wrappers
+# 6.  Utility: convert SIMSOPT Boozer → plain dict
 # ═══════════════════════════════════════════════════════════════════════
 
 def _boozer_obj_to_dict(boozer) -> Dict[str, Any]:
-    """Convert pyneo BoozerData or SIMSOPT Boozer to plain dict.
-
-    Handles naming differences:
-      - pyneo BoozerData:  ixm_b, ixn_b, iota_b, buco_b, bvco_b, nfp_b
-      - SIMSOPT booz_xform: xm_b, xn_b, iota,   (buco/bvco from equil.wout)
-    """
-    booz = {}
-
-    # --- resolve the inner object ---
+    """Convert pyneo BoozerData or SIMSOPT Boozer to plain dict."""
+    booz: Dict[str, Any] = {}
     bx = getattr(boozer, "bx", boozer)
 
-    # --- mode numbers (SIMSOPT: xm_b/xn_b,  pyneo: ixm_b/ixn_b) ---
     for sims_key, pyneo_key in [("xm_b", "ixm_b"), ("xn_b", "ixn_b")]:
         val = getattr(bx, sims_key, None)
-        if val is None:
-            val = getattr(bx, pyneo_key, None)
-        if val is not None:
-            booz[pyneo_key] = np.asarray(val, dtype=np.int32)
+        if val is None: val = getattr(bx, pyneo_key, None)
+        if val is not None: booz[pyneo_key] = np.asarray(val, dtype=np.int32)
 
-    # --- Fourier coefficients ---
-    for key in ("bmnc_b", "rmnc_b", "zmns_b"):
+    for key in ("bmnc_b", "rmnc_b", "zmns_b", "pmns_b"):
         val = getattr(bx, key, None)
         if val is not None:
             booz[key] = np.asarray(val, dtype=np.float64)
-            # SIMSOPT has shape (nmodes, nsurf) → transpose to (nsurf, nmodes)
             if booz[key].ndim == 2 and booz[key].shape[1] < booz[key].shape[0]:
                 booz[key] = booz[key].T
-
-    # --- iota ---
-    iota = getattr(bx, "iota_b", None)
-    if iota is None:
-        iota = getattr(bx, "iota", None)
-    if iota is not None:
-        booz["iota_b"] = np.asarray(iota, dtype=np.float64)
-
-    # --- buco / bvco (curr_pol / curr_tor) ---
-    for sims_key, pyneo_key in [
-        ("buco_b", "buco_b"), ("bvco_b", "bvco_b"),
-        ("Boozer_I", "buco_b"), ("Boozer_G", "bvco_b"),
-    ]:
-        if pyneo_key in booz:
-            continue
-        val = getattr(bx, sims_key, None)
+    if "pmns_b" not in booz:
+        val = getattr(bx, "numns_b", None)
         if val is not None:
-            booz[pyneo_key] = np.asarray(val, dtype=np.float64)
+            booz["pmns_b"] = -np.asarray(val, dtype=np.float64)
+            if booz["pmns_b"].ndim == 2 and booz["pmns_b"].shape[1] < booz["pmns_b"].shape[0]:
+                booz["pmns_b"] = booz["pmns_b"].T
 
-    # --- buco/bvco from equil.wout if still missing ---
+    iota = getattr(bx, "iota_b", None)
+    if iota is None: iota = getattr(bx, "iota", None)
+    if iota is not None: booz["iota_b"] = np.asarray(iota, dtype=np.float64)
+
+    for sims_key, pyneo_key in [("buco_b","buco_b"),("bvco_b","bvco_b"),
+                                ("Boozer_I","buco_b"),("Boozer_G","bvco_b")]:
+        if pyneo_key in booz: continue
+        val = getattr(bx, sims_key, None)
+        if val is not None: booz[pyneo_key] = np.asarray(val, dtype=np.float64)
+
     if "buco_b" not in booz or "bvco_b" not in booz:
         equil = getattr(boozer, "equil", None)
         wout = getattr(equil, "wout", None) if equil is not None else None
         if wout is not None:
-            for wout_key, pyneo_key in [("buco", "buco_b"), ("bvco", "bvco_b")]:
-                if pyneo_key not in booz and hasattr(wout, wout_key):
-                    booz[pyneo_key] = np.asarray(
-                        getattr(wout, wout_key), dtype=np.float64
-                    )
+            for wout_key, pyneo_key in [("buco","buco_b"),("bvco","bvco_b")]:
+                if pyneo_key not in booz and hasattr(wout,wout_key):
+                    booz[pyneo_key] = np.asarray(getattr(wout,wout_key), dtype=np.float64)
 
-    # --- nfp ---
-    for key in ("nfp_b", "nfp"):
-        val = getattr(bx, key, None)
-        if val is not None:
-            booz["nfp_b"] = np.asarray(val)
-            break
     if "nfp_b" not in booz:
-        equil = getattr(boozer, "equil", None)
-        wout = getattr(equil, "wout", None) if equil is not None else None
-        if wout is not None and hasattr(wout, "nfp"):
-            booz["nfp_b"] = np.asarray(getattr(wout, "nfp"))
+        nfp = getattr(bx, "nfp_b", None)
+        if nfp is None: nfp = getattr(bx, "nfp", None)
+        if nfp is not None: booz["nfp_b"] = np.asarray(nfp, dtype=np.int32)
 
-    # --- surface index mapping ---
-    # SIMSOPT: bmnc_b has shape (nmodes, nsurf_booz) or (nsurf_booz, nmodes)
-    # boozer.compute_surfs maps booz-surface-index → full-VMEC-surface-index
-    compute_surfs = getattr(bx, "compute_surfs", None)
-    if compute_surfs is not None:
-        booz["_compute_surfs"] = np.asarray(compute_surfs, dtype=np.int32)
-
-    # iota for the BOOZER surfaces: need to index into full iota profile
-    if "iota_b" in booz and compute_surfs is not None and booz["iota_b"].size > 10:
-        # iota is full-profile (ns_in,), extract for boozer surfaces
-        cs = np.asarray(compute_surfs, dtype=np.int32) - 1  # 1-based → 0-based
-        booz["iota_b"] = booz["iota_b"][cs]
-
+    booz["_compute_surfs"] = np.asarray(getattr(bx, "compute_surfs", np.arange(len(booz.get("bmnc_b",[[]])))), dtype=np.int32)
     return booz
-
-
-def eps_eff_boozer_pyneo_style(
-    boozer,          # pyneo BoozerData or SIMSOPT Boozer
-    surf_idx: int,
-    **kwargs,
-) -> Dict[str, Any]:
-    """Convenience: auto-convert Boozer → dict → eps_eff_from_boozer."""
-    return eps_eff_from_boozer(_boozer_obj_to_dict(boozer), surf_idx, **kwargs)
-
-
-# ═══════════════════════════════════════════════════════════════════════
-# 6.  Benchmark comparison helper
-# ═══════════════════════════════════════════════════════════════════════
-
-def compare_with_pyneo(
-    boozer,
-    surf_indices,
-    pyneo_epstot: NDArray[np.float64],
-    theta0: float = 0.0,
-    nzeta: int = 512,
-    nturn: int = 32,
-    n_b: int = 5000,
-    n_gauss: int = 64,
-    verbose: bool = True,
-) -> Dict[str, NDArray[np.float64]]:
-    """
-    Run both rectangular and Gauss integration for a set of flux surfaces,
-    compare with pyneo epstot.
-
-    Returns dict with keys:
-      surf_idx, pyneo, booz_rect, booz_gauss
-    """
-    booz_dict = _boozer_obj_to_dict(boozer)
-
-    results = {"surf_idx": [], "pyneo": [], "booz_rect": [], "booz_gauss": []}
-
-    for i, s in enumerate(surf_indices):
-        r_rect = eps_eff_from_boozer(
-            booz_dict, s, theta0=theta0, nzeta=nzeta, nturn=nturn,
-            n_b=n_b, use_gauss=False,
-        )
-        r_gauss = eps_eff_from_boozer(
-            booz_dict, s, theta0=theta0, nzeta=nzeta, nturn=nturn,
-            n_gauss=n_gauss, use_gauss=True,
-        )
-        results["surf_idx"].append(s)
-        results["pyneo"].append(float(pyneo_epstot[i]))
-        results["booz_rect"].append(r_rect["eps_eff_32"])
-        results["booz_gauss"].append(r_gauss["eps_eff_32"])
-
-        if verbose:
-            ratio_rect = r_rect["eps_eff_32"] / pyneo_epstot[i]
-            ratio_gauss = r_gauss["eps_eff_32"] / pyneo_epstot[i]
-            print(
-                f"  surf {s:3d}  pyneo={pyneo_epstot[i]:.4e}  "
-                f"rect={r_rect['eps_eff_32']:.4e} (×{ratio_rect:.3f})  "
-                f"gauss={r_gauss['eps_eff_32']:.4e} (×{ratio_gauss:.3f})"
-            )
-
-    return {k: np.array(v) for k, v in results.items()}
