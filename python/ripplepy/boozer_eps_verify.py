@@ -343,66 +343,161 @@ def eps_eff_pyneo_style(
     booz: Dict[str, Any],
     surf_idx: int,
     theta0: Optional[float] = None,
-    nzeta: int = 1024,
     nturn: int = 64,
     npart: int = 100,
+    nstep_per: int = 50,
     multra: int = 1,
 ) -> Dict[str, Any]:
-    """ε_eff^(3/2) matching pyneo's flint_bo + rhs_bo1 algorithm exactly."""
-    fl = sample_fieldline_from_boozer(booz, surf_idx, theta0, nzeta, nturn)
-    B = fl.B; gp = fl.gradpsi; kg = fl.kg_gradpsi; pard = fl.pard
-    npts = len(B)
-    dphi = 2.0 * np.pi / nzeta
-    b0 = np.max(B); bmin = np.min(B)
+    """ε_eff^(3/2) matching pyneo's flint_bo + rhs_bo1 algorithm exactly.
 
-    inv_B2 = 1.0 / B**2
-    e2 = np.sum(inv_B2) * dphi
-    e3 = np.sum(inv_B2 * gp) * dphi
+    Uses pyneo-style stepper: nstep_per points per toroidal transit,
+    with analytic Fourier evaluation at each (θ, ζ) point inside the loop.
+    """
+    # --- extract surface data (same as sample_fieldline_from_boozer) ---
+    xm = np.asarray(booz["ixm_b"], dtype=np.int32)
+    xn = np.asarray(booz["ixn_b"], dtype=np.int32)
+    bmnc_s = np.asarray(booz["bmnc_b"][surf_idx, :], dtype=np.float64)
+    rmnc_s = np.asarray(booz["rmnc_b"][surf_idx, :], dtype=np.float64)
+    zmns_s = np.asarray(booz["zmns_b"][surf_idx, :], dtype=np.float64)
+    pmns_s = booz.get("pmns_b", None)
+    if pmns_s is not None:
+        pmns_s = np.asarray(pmns_s[surf_idx, :], dtype=np.float64)
+
+    iota = float(np.asarray(booz["iota_b"]).flat[surf_idx])
+    I_   = float(np.asarray(booz["bvco_b"]).flat[surf_idx])
+    J_   = float(np.asarray(booz["buco_b"]).flat[surf_idx])
+    nfp  = int(np.asarray(booz.get("nfp_b", booz.get("nfp", 1))).flat[0])
+
+    if theta0 is None:
+        theta0, phi0_bmax = _find_bmax_location(bmnc_s, xm, xn)
+    else:
+        phi0_bmax = 0.0
+
+    # ── pyneo-style stepper and state machine ──
+
+    ntot = nstep_per * nturn
+    hphi = 2.0 * np.pi / nstep_per
+    zeta_arr = phi0_bmax + np.arange(ntot, dtype=np.float64) * hphi
+    theta_arr = theta0 + iota * (zeta_arr - phi0_bmax)
+
+    # Single-pass Fourier (same as boozer_eps_verify)
+    result = _sample_fieldline_fourier(bmnc_s, rmnc_s, zmns_s, xm, xn,
+                                       theta_arr, zeta_arr, pmns=pmns_s)
+    if pmns_s is not None:
+        b_arr, b_tb_arr, b_pb_arr, r_arr, r_tb_arr, r_pb_arr, z_arr, z_tb_arr, z_pb_arr, l_arr, p_tb_arr, p_pb_arr = result
+    else:
+        b_arr, b_tb_arr, b_pb_arr, r_arr, r_tb_arr, r_pb_arr, z_arr, z_tb_arr, z_pb_arr = result
+        l_arr = p_tb_arr = p_pb_arr = np.zeros_like(b_arr)
+
+    # neo_fourier.f90:138-139 normalization
+    p_tb_arr = p_tb_arr * (2.0 * np.pi / nfp)
+    p_pb_arr = 1.0 + p_pb_arr * (2.0 * np.pi / nfp)
+
+    # metric → |∇ψ|
+    fac = I_ + iota * J_
+    gtbtb = r_tb_arr*r_tb_arr + z_tb_arr*z_tb_arr + r_arr*r_arr * p_tb_arr*p_tb_arr
+    gpbpb = r_pb_arr*r_pb_arr + z_pb_arr*z_pb_arr + r_arr*r_arr * p_pb_arr*p_pb_arr
+    gtbpb = r_tb_arr*r_pb_arr + z_tb_arr*z_pb_arr + r_arr*r_arr * p_tb_arr*p_pb_arr
+    sqrg11 = np.sqrt(np.abs(gtbtb*gpbpb - gtbpb*gtbpb)) * b_arr*b_arr / fac  # |∇ψ|
+    kg_arr = (J_*b_pb_arr - I_*b_tb_arr) / fac                                  # |∇ψ|·κ_G
+    pard_arr = b_pb_arr + iota * b_tb_arr                                       # parallel deriv
+
+    b0 = np.max(b_arr); bmin = np.min(b_arr)
+    inv_B2 = 1.0 / b_arr**2
+    e2 = np.sum(inv_B2) * hphi          # ∫ dφ / B²
+    e3 = np.sum(inv_B2 * sqrg11) * hphi # ∫ dφ |∇ψ| / B²
 
     etamin = bmin / b0
     heta = (1.0 - etamin) / (npart - 1)
     eta_vals = etamin + heta / 2.0 + np.arange(npart) * heta
 
-    xm = np.asarray(booz["ixm_b"], dtype=np.int32)
-    xn = np.asarray(booz["ixn_b"], dtype=np.int32)
     rmnc = np.asarray(booz["rmnc_b"][surf_idx,:], dtype=np.float64)
     m0 = np.where((xm == 0) & (xn == 0))[0]
     rt0 = float(rmnc[m0[0]]) if len(m0) > 0 else 1.0
     rt0_sq = rt0**2
     coeps = np.pi * rt0_sq * heta / (8.0 * np.sqrt(2.0))
 
-    bra_arr = B / b0; invB2_arr = inv_B2; kg_arr = kg
+    bra_arr = b_arr / b0; invB2_arr = inv_B2
     sqrt_eta_cache = np.sqrt(eta_vals)
     bigint_total = 0.0
 
     for i_eta, eta in enumerate(eta_vals):
         sqeta = sqrt_eta_cache[i_eta]
         isw = 0; iswst = 0; icount = 0; ipa = 0
-        H_acc = 0.0; I_acc = 0.0; pard0 = pard[0]
+        H_acc = 0.0; I_acc = 0.0; pard0 = pard_arr[0]
 
-        for k in range(npts):
-            bra = bra_arr[k]; subsq = 1.0 - bra / eta
-            if pard0 <= 0.0 and pard[k] > 0.0: ipass = 1
-            else: ipass = 0
+        for k in range(ntot - 1):
+            idx0 = k; idx_h = k; idx1 = k + 1
+
+            def _get(kk, frac=0.0):
+                """Linear interpolation between kk and kk+1 at fraction frac."""
+                if frac == 0.0:
+                    return bra_arr[kk], invB2_arr[kk], kg_arr[kk], pard_arr[kk]
+                w1 = frac; w0 = 1.0 - w1
+                bra = w0*bra_arr[kk] + w1*bra_arr[kk+1]
+                invB2 = w0*invB2_arr[kk] + w1*invB2_arr[kk+1]
+                kg = w0*kg_arr[kk] + w1*kg_arr[kk+1]
+                pard = w0*pard_arr[kk] + w1*pard_arr[kk+1]
+                return bra, invB2, kg, pard
+
+            # RK4 stage 1: ζ_k
+            bra, invB2_v, kg_v, _ = _get(k, 0.0)
+            subsq = 1.0 - bra / eta
             if subsq > 0.0:
+                sq = np.sqrt(subsq) * invB2_v
+                I1 = sq * hphi
+                H1 = sq * (4.0 / bra - 1.0 / eta) * kg_v / sqeta * hphi
+            else:
+                I1 = H1 = 0.0
+
+            # RK4 stage 2: ζ_k + hphi/2
+            bra, invB2_v, kg_v, _ = _get(k, 0.5)
+            subsq = 1.0 - bra / eta
+            if subsq > 0.0:
+                sq = np.sqrt(subsq) * invB2_v
+                I2 = sq * hphi
+                H2 = sq * (4.0 / bra - 1.0 / eta) * kg_v / sqeta * hphi
+            else:
+                I2 = H2 = 0.0
+
+            # RK4 stage 3: ζ_k + hphi/2 (same point, different slope in ODE)
+            I3 = I2; H3 = H2
+
+            # RK4 stage 4: ζ_{k+1}
+            bra, invB2_v, kg_v, _ = _get(k + 1, 0.0)
+            subsq = 1.0 - bra / eta
+            if subsq > 0.0:
+                sq = np.sqrt(subsq) * invB2_v
+                I4 = sq * hphi
+                H4 = sq * (4.0 / bra - 1.0 / eta) * kg_v / sqeta * hphi
+            else:
+                I4 = H4 = 0.0
+
+            # State machine: detect entry/exit using ζ_k values
+            bra_k1 = bra_arr[k + 1]
+            subsq_k1 = 1.0 - bra_k1 / eta
+            if pard0 <= 0.0 and pard_arr[k + 1] > 0.0: ipass = 1
+            else: ipass = 0
+
+            if subsq_k1 > 0.0:
                 isw = 1; icount += 1; ipa += ipass
-                sq = np.sqrt(subsq) * invB2_arr[k]
-                I_acc += sq * dphi
-                H_acc += sq * (4.0 / bra - 1.0 / eta) * kg_arr[k] / sqeta * dphi
+                I_acc += (I1 + 2.0*I2 + 2.0*I3 + I4) / 6.0
+                H_acc += (H1 + 2.0*H2 + 2.0*H3 + H4) / 6.0
             else:
                 if isw == 1: isw = 2
+
             if isw == 2:
                 if I_acc > 1.0e-15:
                     bigint_total += H_acc*H_acc/I_acc * iswst
                 iswst = 1; H_acc = 0.0; I_acc = 0.0; icount = 0; ipa = 0; isw = 0
-            pard0 = pard[k]
+            pard0 = pard_arr[k + 1]
 
     eps_eff_32 = coeps * bigint_total * e2 / e3**2
     eps_eff = eps_eff_32 ** (2.0 / 3.0)
     return {
         "eps_eff_32": float(eps_eff_32), "eps_eff": float(eps_eff),
         "e2": float(e2), "e3": float(e3), "bigint_total": float(bigint_total),
-        "heta": float(heta), "iota": fl.iota,
+        "heta": float(heta), "iota": iota,
         "b0": float(b0), "bmin": float(bmin), "bmax": float(b0),
         "rt0_squared": float(rt0_sq),
     }

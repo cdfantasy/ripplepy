@@ -38,7 +38,7 @@ VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
 SURF_IDX_LIST = np.linspace(0.1, 1.0, 10)
 NTURN = 200
 NPHI = 360
-NPART = 5000
+NPART = 500
 NPART_PY = 500
 COMPARE_PYTHON = True            # True → also run Python η-state-machine + diagnostics
 CACHE_FIELDLINE = False
@@ -127,7 +127,7 @@ def main():
     ctx.set_flux_surfaces(neo_surfaces_from_simsopt_boozer(boozer).tolist())
     ctx.set_resolution(theta_n=100, phi_n=100)
     ctx.set_transport_options(
-        npart=NPART_PY, multra=1, acc_req=0.01, no_bins=100,
+        npart=NPART, multra=1, acc_req=0.01, no_bins=100,
         nstep_per=50, nstep_min=500, nstep_max=5000, calc_nstep_max=0)
     ctx.set_switches(ref_swi=2, eout_swi=2, calc_cur=0)
     ctx.set_output_options(
@@ -158,7 +158,7 @@ def main():
         print(f"\n[4] Boozer → Python η-state-machine (npart={NPART_PY}) …")
         eps_bp = []; debug_r = None
         for k_surf in range(len(SURF_IDX_LIST)):
-            r = eps_eff_pyneo_style(booz_dict, k_surf, nzeta=NPHI, nturn=NTURN, npart=NPART_PY)
+            r = eps_eff_pyneo_style(booz_dict, k_surf, nturn=NTURN, npart=NPART_PY, nstep_per=50)
             eps_bp.append(r["eps_eff_32"])
             if k_surf == k_diag:
                 debug_r = r

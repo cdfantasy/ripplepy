@@ -179,24 +179,24 @@ for name, dv, pv in [("|B|", dB, B_py), ("|∇ψ|", dgp, gp_py), ("|∇ψ|·κ_G
 phi_geo = phal - Nu if pmns is not None else phal
 nfp = int(np.asarray(booz_dict.get('nfp_b', 2)).flat[0])
 phi_geo = np.mod(phi_geo, 2*np.pi/nfp)  # restrict to one field period
-# R_line = R.ravel()
-# Z_line = Z.ravel()
+R_line = R.ravel()
+Z_line = Z.ravel()
 
-# X = R_line * np.cos(phi_geo)
-# Y = R_line * np.sin(phi_geo)
+X = R_line * np.cos(phi_geo)
+Y = R_line * np.sin(phi_geo)
 
-# fig = plt.figure(figsize=(24, 24))
-# ax = fig.add_subplot(111, projection='3d')
+fig = plt.figure(figsize=(24, 24))
+ax = fig.add_subplot(111, projection='3d')
 
-# ax.scatter(X, Y, Z_line, color='blue', s=1)  # s控制点大小
+ax.scatter(X, Y, Z_line, color='blue', s=1)  # s控制点大小
 
-# ax.set_title("Fieldline in 3D (R, Z, φ_geo)")
-# ax.set_xlabel("R")
-# ax.set_ylabel("Z")
-# ax.set_zlabel("φ_geo")
+ax.set_title("Fieldline in 3D (R, Z, φ_geo)")
+ax.set_xlabel("R")
+ax.set_ylabel("Z")
+ax.set_zlabel("φ_geo")
 
-# plt.tight_layout()
-# plt.show()
+plt.tight_layout()
+plt.show()
 
 
 from ripplepy import initialize_mgrid_field, set_extcur, get_bfield_matrix
