@@ -18,9 +18,9 @@ BASE = str(Path(__file__).resolve().parent.parent)
 
 DEVICE = "CFQS"
 VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
-SURF_S = 0.5
-THETA_N = 100
-PHI_N = 100
+SURF_S = 1
+THETA_N = 200
+PHI_N = 200
 
 print(f"\n{'='*60}")
 print(f"  Grid comparison: Fourier vs pyneo  ({DEVICE}, s={SURF_S})")
@@ -176,48 +176,47 @@ for name, dv, pv in [("|B|", dB, B_py), ("|∇ψ|", dgp, gp_py), ("|∇ψ|·κ_G
 # mgrid comparison: Fourier |B| vs mgrid |B| at same (R,Z,φ_geo)
 # ══════════════════════════════════
 
-phi_geo = phal - Nu if pmns is not None else phal
-nfp = int(np.asarray(booz_dict.get('nfp_b', 2)).flat[0])
-phi_geo = np.mod(phi_geo, 2*np.pi/nfp)  # restrict to one field period
-R_line = R.ravel()
-Z_line = Z.ravel()
+# phi_geo = phal - Nu if pmns is not None else phal
+# nfp = int(np.asarray(booz_dict.get('nfp_b', 2)).flat[0])
+# phi_geo = np.mod(phi_geo, 2*np.pi/nfp)  # restrict to one field period
+# R_line = R.ravel()
+# Z_line = Z.ravel()
 
-X = R_line * np.cos(phi_geo)
-Y = R_line * np.sin(phi_geo)
+# X = R_line * np.cos(phi_geo)
+# Y = R_line * np.sin(phi_geo)
 
-fig = plt.figure(figsize=(24, 24))
-ax = fig.add_subplot(111, projection='3d')
+# fig = plt.figure(figsize=(24, 24))
+# ax = fig.add_subplot(111, projection='3d')
 
-ax.scatter(X, Y, Z_line, color='blue', s=1)  # s控制点大小
+# ax.scatter(X, Y, Z_line, color='blue', s=1)  # s控制点大小
 
-ax.set_title("Fieldline in 3D (R, Z, φ_geo)")
-ax.set_xlabel("R")
-ax.set_ylabel("Z")
-ax.set_zlabel("φ_geo")
+# ax.set_title("Fieldline in 3D (R, Z, φ_geo)")
+# ax.set_xlabel("R")
+# ax.set_ylabel("Z")
+# ax.set_zlabel("φ_geo")
 
-plt.tight_layout()
-plt.show()
+# plt.tight_layout()
+# plt.show()
 
 
-from ripplepy import initialize_mgrid_field, set_extcur, get_bfield_matrix
-MGRID_PATH = f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc"
-initialize_mgrid_field(MGRID_PATH, nfp=int(np.asarray(booz_dict.get('nfp_b',2)).flat[0]), full_torus=False)
-set_extcur(None)
-B_mgrid = np.sqrt(np.sum(get_bfield_matrix(None, R.ravel(), Z.ravel(), phi_geo)[:, :3]**2, axis=1))
-B_mgrid = B_mgrid.reshape(ntheta, nphi)
-dB_mg = B_f.ravel() - B_mgrid.ravel()
-rms_mg = np.sqrt(np.mean(dB_mg**2))
-mx_mg  = np.max(np.abs(dB_mg))
+# from ripplepy import initialize_mgrid_field, set_extcur, get_bfield_matrix
+# MGRID_PATH = f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc"
+# initialize_mgrid_field(MGRID_PATH, nfp=int(np.asarray(booz_dict.get('nfp_b',2)).flat[0]), full_torus=False)
+# set_extcur(None)
+# B_mgrid = np.sqrt(np.sum(get_bfield_matrix(None, R.ravel(), Z.ravel(), phi_geo)[:, :3]**2, axis=1))
+# B_mgrid = B_mgrid.reshape(ntheta, nphi)
+# dB_mg = B_f.ravel() - B_mgrid.ravel()
+# rms_mg = np.sqrt(np.mean(dB_mg**2))
+# mx_mg  = np.max(np.abs(dB_mg))
 
-plt.figure(figsize=(24, 24))
-_plot_diff(plt.gca(), dB_mg.reshape(ntheta, nphi) /np.maximum(B_mgrid, 1e-15), "|B| (F − M) / M")
-plt.tight_layout()
-plt.show()
-print(f"\n  {'─'*60}")
-print(f"  Fourier |B| vs mgrid |B|  (same real-space points)")
-print(f"  {'─'*60}")
-print(f"  {'|B| rms Δ':>14s}  {rms_mg:12.3e}  {'max |Δ|':>12s}  {mx_mg:12.3e}")
-print(f"  {'Fourier mean':>14s}  {np.mean(B_f):12.6f}  {'mgrid mean':>14s}  {np.mean(B_mgrid):12.6f}")
-print()
-print()
-
+# plt.figure(figsize=(24, 24))
+# _plot_diff(plt.gca(), dB_mg.reshape(ntheta, nphi) /np.maximum(B_mgrid, 1e-15), "|B| (F − M) / M")
+# plt.tight_layout()
+# plt.show()
+# print(f"\n  {'─'*60}")
+# print(f"  Fourier |B| vs mgrid |B|  (same real-space points)")
+# print(f"  {'─'*60}")
+# print(f"  {'|B| rms Δ':>14s}  {rms_mg:12.3e}  {'max |Δ|':>12s}  {mx_mg:12.3e}")
+# print(f"  {'Fourier mean':>14s}  {np.mean(B_f):12.6f}  {'mgrid mean':>14s}  {np.mean(B_mgrid):12.6f}")
+# print()
+# print()

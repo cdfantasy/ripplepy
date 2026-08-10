@@ -54,3 +54,4 @@ timing*
 .png
 .reasonix/
 reasonix.toml
+_skbuild/*

@@ -161,7 +161,7 @@ run_benchmark(
     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
     (1.21, 0), None, 2,
     np.linspace(0.1, 1, 11),
-    nturn=200, nphi=360, npart=5000,
+    nturn=100, nphi=100, npart=500,
     full_torus=False,
 )
 

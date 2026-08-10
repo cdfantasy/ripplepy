@@ -974,6 +974,9 @@ contains
       real(8) :: e2, e3
       integer :: isw, iswst
       logical :: prev_inside
+      ! RK4 variables
+      real(8) :: sqeta, sq, bra1, bra2, bra4
+      real(8) :: dI1, dI2, dI3, dI4, dH1, dH2, dH3, dH4
       real(8), allocatable :: ds_over_B_arr(:)
 
       npts = size(fieldline_data, 1)
@@ -1030,78 +1033,81 @@ contains
 
       do k = 1, npart
         eta_val = (bmin/b0) + heta/2.0d0 + real(k-1, 8) * heta
+        sqeta   = sqrt(eta_val)
 
-        isw    = 0       ! 0=free, 1=in_well
+        isw    = 0       ! 0=free, 1=in_well, 2=just_exited (pyneo isw)
         iswst  = 0       ! first-bounce sentinel (matches pyneo)
         H_acc  = 0.0d0
         I_acc  = 0.0d0
-        prev_inside = .false.
-        prev_I = 0.0d0
-        prev_H = 0.0d0
 
-        do i = 1, npts
-          Bmag = fieldline_data(i, 7)
-          if (Bmag < 1.0d-15) cycle
-
-          b_loc  = Bmag / b0
-          subsq  = 1.0d0 - b_loc / eta_val
-
+        ! RK4 (Simpson on 3-point segments, stride 2)
+        do i = 1, npts - 2, 2
+          ! ── k1 at grid(i) ──
+          bra1  = fieldline_data(i, 7) / b0
+          subsq = 1.0d0 - bra1 / eta_val
           if (subsq > 0.0d0) then
-            ! --- INSIDE WELL ---
             isw = 1
-            sqrt_term = sqrt(subsq)
-            ds_over_B = ds_over_B_arr(i)
-            grad_psi  = fieldline_data(i, 11)
-            kappa_g   = geocur(i)
-
-            cur_I = ds_over_B * sqrt_term
-            cur_H = (1.0d0/eta_val) * ds_over_B * sqrt(eta_val - b_loc) &
-                    * (4.0d0/b_loc - 1.0d0/eta_val) * grad_psi * kappa_g
-
-            if (prev_inside) then
-              ! Trapezoidal rule: 0.5 * (f_{k-1} + f_k)
-              I_acc = I_acc + 0.5d0 * (prev_I + cur_I)
-              H_acc = H_acc + 0.5d0 * (prev_H + cur_H)
-            else
-              ! First point entering well: half-trapezoid from boundary (0)
-              I_acc = I_acc + 0.5d0 * cur_I
-              H_acc = H_acc + 0.5d0 * cur_H
-            end if
-
-            prev_inside = .true.
-            prev_I = cur_I
-            prev_H = cur_H
-
+            sq = ds_over_B_arr(i) * sqrt(subsq)
+            dI1 = sq
+            dH1 = sq * (4.0d0/bra1 - 1.0d0/eta_val) &
+                  * fieldline_data(i, 11) * geocur(i) / sqeta
           else
-            ! --- OUTSIDE WELL ---
-            if (isw == 1) then
-              ! Closing half-trapezoid from last interior point to boundary (0)
-              I_acc = I_acc + 0.5d0 * prev_I
-              H_acc = H_acc + 0.5d0 * prev_H
-              ! Just exited a well → settle
-              if (I_acc > 1.0d-15) then
-                bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
-              end if
-              iswst = 1
-              H_acc = 0.0d0; I_acc = 0.0d0
-              isw = 0
-            end if
-            prev_inside = .false.
-            prev_I = 0.0d0
-            prev_H = 0.0d0
+            if (isw == 1) isw = 2
+            dI1 = 0.0d0; dH1 = 0.0d0
           end if
-        end do
 
-        ! Handle particle still in well at end of trace
-        if (isw == 1) then
-          ! Closing half-trapezoid at end of trace
-          I_acc = I_acc + 0.5d0 * prev_I
-          H_acc = H_acc + 0.5d0 * prev_H
-          if (I_acc > 1.0d-15) then
-            bigint_total = bigint_total + (H_acc * H_acc / I_acc) * real(iswst, 8)
+          ! ── k2 at grid(i+1) ──
+          bra2  = fieldline_data(i+1, 7) / b0
+          subsq = 1.0d0 - bra2 / eta_val
+          if (subsq > 0.0d0) then
+            isw = 1
+            sq = ds_over_B_arr(i+1) * sqrt(subsq)
+            dI2 = sq
+            dH2 = sq * (4.0d0/bra2 - 1.0d0/eta_val) &
+                  * fieldline_data(i+1, 11) * geocur(i+1) / sqeta
+          else
+            if (isw == 1) isw = 2
+            dI2 = 0.0d0; dH2 = 0.0d0
           end if
-        end if
-      end do
+
+          ! ── k3 at grid(i+1)  (same geometry as k2, ipass=0 in pyneo) ──
+          dI3 = dI2
+          dH3 = dH2
+
+          ! ── k4 at grid(i+2) ──
+          bra4  = fieldline_data(i+2, 7) / b0
+          subsq = 1.0d0 - bra4 / eta_val
+          if (subsq > 0.0d0) then
+            isw = 1
+            sq = ds_over_B_arr(i+2) * sqrt(subsq)
+            dI4 = sq
+            dH4 = sq * (4.0d0/bra4 - 1.0d0/eta_val) &
+                  * fieldline_data(i+2, 11) * geocur(i+2) / sqeta
+          else
+            if (isw == 1) isw = 2
+            dI4 = 0.0d0; dH4 = 0.0d0
+          end if
+
+          ! ── RK4 combination: Simpson weights on 3 points ──
+          !     ∫ f dx ≈ dx/3 * (f₀ + 4f₁ + f₂), dI_raw = dx * f
+          !     → (dI1 + 4*dI2 + dI4) / 3   (k2=k3 gives weight 4)
+          I_acc = I_acc + (dI1 + 4.0d0*dI2 + dI4) / 3.0d0
+          H_acc = H_acc + (dH1 + 4.0d0*dH2 + dH4) / 3.0d0
+
+          ! ── Bounce settlement (pyneo flint_bo.f90:183-203) ──
+          if (isw == 2) then
+            if (I_acc > 1.0d-15) then
+              bigint_total = bigint_total &
+                           + (H_acc * H_acc / I_acc) * real(iswst, 8)
+            end if
+            iswst = 1
+            H_acc = 0.0d0; I_acc = 0.0d0
+            isw = 0
+          end if
+        end do ! i
+
+        ! Discard tail — remainder of (npts-1)/2 points unused
+      end do ! k
 
       ! --- final formula (matching pyneo convention) ---
       epsilon_eff = (PI * R0**2 * heta / (8.0d0 * sqrt(2.0d0))) &
