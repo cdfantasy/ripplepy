@@ -198,9 +198,10 @@ def sample_fieldline_from_boozer(
         b, b_tb, b_pb, r, r_tb, r_pb, z, z_tb, z_pb = result
         l = p_tb = p_pb = np.zeros_like(b)
 
-    # ── neo_fourier.f90:138-139:  p_tb = p_tb * twopi/nfp,  p_pb = ONE + p_pb * twopi/nfp ──
-    p_tb = p_tb * (2.0 * np.pi / nfp)
-    p_pb = 1.0 + p_pb * (2.0 * np.pi / nfp)
+    # ── neo_fourier.f90:138-139 net effect: p_tb -> -p_tb_raw, p_pb -> 1 - p_pb_raw
+    #    (lmns = -pmns·nfp/(2π) cancels the 2π/nfp factor exactly) ──
+    p_tb = -p_tb
+    p_pb = 1.0 - p_pb
 
     # --- metric: g_ij (neo_fourier.f90:173-175) ---
     gtbtb = r_tb*r_tb + z_tb*z_tb + r*r * p_tb*p_tb
@@ -531,7 +532,20 @@ def _boozer_obj_to_dict(boozer) -> Dict[str, Any]:
 
     iota = getattr(bx, "iota_b", None)
     if iota is None: iota = getattr(bx, "iota", None)
-    if iota is not None: booz["iota_b"] = np.asarray(iota, dtype=np.float64)
+    if iota is not None:
+        iota_arr = np.asarray(iota, dtype=np.float64)
+        # booz_xform exposes iota on the FULL radial grid (len ~ ns-1), while
+        # bmnc_b/rmnc_b/... hold only the computed surfaces.  Align them using
+        # compute_surfs (0-based full-grid indices) so that iota_b[k] matches
+        # bmnc_b[k].  (Boozer_G/Boozer_I above are already per-surface scalars.)
+        n_bmnc = booz.get("bmnc_b", np.empty((0,))).shape[0] if "bmnc_b" in booz else 0
+        cs = getattr(bx, "compute_surfs", None)
+        if (iota_arr.ndim == 1 and cs is not None and n_bmnc > 0
+                and iota_arr.size != n_bmnc):
+            cs_arr = np.asarray(cs, dtype=np.int64).ravel()
+            if cs_arr.size == n_bmnc and (cs_arr.size == 0 or cs_arr.max() < iota_arr.size):
+                iota_arr = iota_arr[cs_arr]
+        booz["iota_b"] = iota_arr
 
     for sims_key, pyneo_key in [("buco_b","buco_b"),("bvco_b","bvco_b"),
                                 ("Boozer_I","buco_b"),("Boozer_G","bvco_b")]:
@@ -617,10 +631,9 @@ def _eval_geometry_at_point(
             p_tb    += -xmm * li * cos_a
             p_pb    +=  xnn * li * cos_a
 
-    # neo_fourier.f90:138-139 normalization
-    twopi_nfp = 2.0 * np.pi / nfp
-    p_tb = p_tb * twopi_nfp
-    p_pb = 1.0 + p_pb * twopi_nfp
+    # pyneo net effect: p_tb -> -p_tb_raw, p_pb -> 1 - p_pb_raw
+    p_tb = -p_tb
+    p_pb = 1.0 - p_pb
 
     # Metric tensor → sqrg11 = |∇ψ|,  kg = |∇ψ|·κ_G
     gtbtb = r_tb * r_tb + z_tb * z_tb + r * r * p_tb * p_tb
@@ -1003,9 +1016,9 @@ def _compute_geom_on_arrays(
         p_tb = np.zeros_like(b_a)
         p_pb = np.zeros_like(b_a)
 
-    twopi_nfp = 2.0 * np.pi / nfp
-    p_tb *= twopi_nfp
-    p_pb = 1.0 + p_pb * twopi_nfp
+    # pyneo net effect: p_tb -> -p_tb_raw, p_pb -> 1 - p_pb_raw
+    p_tb = -p_tb
+    p_pb = 1.0 - p_pb
 
     gtbtb = r_tb * r_tb + z_tb * z_tb + r_a * r_a * p_tb * p_tb
     gpbpb = r_pb * r_pb + z_pb * z_pb + r_a * r_a * p_pb * p_pb
@@ -1024,6 +1037,7 @@ def eps_eff_pyneo_ode_fast(
     nturn: int = 64,
     npart: int = 100,
     nstep_per: int = 50,
+    rt0_ref: Optional[float] = None,
 ) -> Dict[str, Any]:
     """eps_eff^(3/2) -- fast vectorized-precompute variant.
 
@@ -1033,6 +1047,15 @@ def eps_eff_pyneo_ode_fast(
 
     No interpolation -- the k1/k2/k3/k4 (theta, phi) positions are determined
     analytically from dtheta/dphi = iota and evaluated exactly.
+
+    Stepping matches pyneo flint_bo: ``nstep_per`` RK4 steps per FIELD PERIOD,
+    step size ``hphi = 2π/(nstep_per·nfp)`` (flint_bo.f90:113), so one
+    toroidal transit uses ``nstep_per·nfp`` steps.
+
+    ``rt0_ref`` optionally overrides the reference major radius used in
+    ``coeps = π·rt0²·heta/(8√2)``; pyneo uses the (m,n)=(0,0) harmonic of the
+    FIRST computed surface for every surface (neo_init.f90:42).  When None,
+    the current surface's R00 is used (legacy behaviour).
 
     This is ~50x faster than :func:`eps_eff_pyneo_ode` while producing
     identical results (since dtheta/dphi = iota is constant, the RK4 midpoint
@@ -1066,7 +1089,10 @@ def eps_eff_pyneo_ode_fast(
         bmin = float(np.min(B_scan))
 
     m0 = np.where((xm == 0) & (xn == 0))[0]
-    rt0 = float(rmnc_s[m0[0]]) if len(m0) > 0 else 1.0
+    if rt0_ref is not None:
+        rt0 = float(rt0_ref)
+    else:
+        rt0 = float(rmnc_s[m0[0]]) if len(m0) > 0 else 1.0
     rt0_sq = rt0**2
 
     # Eta particles
@@ -1077,8 +1103,9 @@ def eps_eff_pyneo_ode_fast(
     coeps = np.pi * rt0_sq * heta / (8.0 * np.sqrt(2.0))
 
     # Precompute geometry at ALL RK4 substep positions (vectorized)
-    nstep = nturn * nstep_per
-    hphi = 2.0 * np.pi / nstep_per
+    # pyneo: nstep_per steps per field period, hphi = 2π/(nstep_per·nfp)
+    nstep = nturn * nstep_per * nfp
+    hphi = 2.0 * np.pi / (nstep_per * nfp)
 
     # k1/k4 points: (theta_k, phi_k) for k = 0 .. nstep  (nstep+1 values)
     phi_arr = phi0 + np.arange(nstep + 1, dtype=np.float64) * hphi

@@ -1022,7 +1022,10 @@ contains
         e3 = e3 + ds_over_B * grad_psi
       end do
 
-      if (e3 < 1.0d-15) then
+      ! fac = curr_pol + iota*curr_tor may be NEGATIVE (e.g. H1: Boozer_G<0),
+      ! which makes grad_psi (= sqrg11) negative, exactly as in NEO.  e3 is
+      ! squared in the final formula, so only its magnitude must be checked.
+      if (abs(e3) < 1.0d-15) then
         epsilon_eff = 0.0d0
         deallocate(ds_over_B_arr)
         return

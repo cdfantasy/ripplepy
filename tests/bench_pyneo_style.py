@@ -154,27 +154,27 @@ BASE = str(Path(__file__).resolve().parent.parent)
 # ═══════════════════════════════════════════════════════════════
 
 
-run_benchmark(
-    "CFQS",
-    f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
-    f"{BASE}/tests/test_file/cfqs_boozmn.nc",
-    f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
-    (1.21, 0), None, 2,
-    np.linspace(0.1, 1, 11),
-    nturn=100, nphi=100, npart=500,
-    full_torus=False,
-)
-
-# # ═══════════════════════════════════════════════════════════════
-# # H1
-# # ═══════════════════════════════════════════════════════════════
 # run_benchmark(
-#     "H1",
-#     f"{BASE}/tests/test_file/wout_H1_design_kh0_kv1_m13_n44_fixed_iota_free.nc",
-#     f"{BASE}/tests/test_file/h1_boozmn.nc",
-#     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
-#     (1.26, 0), [50000, 5000, 2000, -80000, -40000], 3,
+#     "CFQS",
+#     f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
+#     f"{BASE}/tests/test_file/cfqs_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
+#     (1.21, 0), None, 2,
 #     np.linspace(0.1, 1, 11),
-#     nturn=200, nphi=360, npart=5000,
+#     nturn=100, nphi=100, npart=500,
 #     full_torus=False,
 # )
+
+# ═══════════════════════════════════════════════════════════════
+# H1
+# ═══════════════════════════════════════════════════════════════
+run_benchmark(
+    "H1",
+    f"{BASE}/tests/test_file/wout_h1_design.nc",
+    f"{BASE}/tests/test_file/h1_boozmn.nc",
+    f"{BASE}/tests/test_file/mgrid_h1_design.nc",
+    (1.26, 0), [50000, 5000, 0, -80000, -40000], 3,
+    np.linspace(0.1, 1, 11),
+    nturn=200, nphi=360, npart=5000,
+    full_torus=False,
+)

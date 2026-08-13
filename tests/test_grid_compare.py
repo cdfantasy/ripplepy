@@ -18,7 +18,7 @@ BASE = str(Path(__file__).resolve().parent.parent)
 
 DEVICE = "CFQS"
 VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
-SURF_S = 1
+SURF_S = 0.1111
 THETA_N = 200
 PHI_N = 200
 
@@ -64,9 +64,14 @@ bmnc = booz_dict["bmnc_b"][k_diag, :].astype(np.float64)
 rmnc = booz_dict["rmnc_b"][k_diag, :].astype(np.float64)
 zmns = booz_dict["zmns_b"][k_diag, :].astype(np.float64)
 
-# Match pyneo's grid: arange (excludes 2π), not linspace (includes 2π)
-th = np.arange(ntheta, dtype=np.float64) * (2*np.pi / ntheta)
-ph = np.arange(nphi,   dtype=np.float64) * (2*np.pi / nphi)
+# Match pyneo's grid exactly (NEO/Sources/neo_prep.f90:103-118):
+#   - phi spans a single field period [0, 2π/nfp]
+#   - both angles are inclusive-endpoint grids, step = span/(n-1)
+# (arange-based grids exclude the endpoint and cover 2π, giving O(1/n)
+#  pointwise discrepancies even though the harmonic data are identical.)
+nfp = int(np.asarray(booz_dict.get("nfp_b", 2)).flat[0])
+th = np.linspace(0.0, 2*np.pi, ntheta)
+ph = np.linspace(0.0, 2*np.pi/nfp, nphi)
 TH, PH = np.meshgrid(th, ph, indexing="ij")
 thal = TH.ravel(); phal = PH.ravel()
 
@@ -81,11 +86,17 @@ else:
     B_f, dBdt, dBdz, R, dRdt, dRdz, Z, dZdt, dZdz = result
     Nu = dNdt = dNdz = np.zeros_like(B_f)
 
+# pyneo transforms the Boozer phase as lmns = -pmns·nfp/(2π) (neo/boozer.py)
+# and then multiplies p_tb by 2π/nfp (neo_fourier.f90:138-139); the net
+# effect on _sample_fieldline_fourier's raw p_tb/p_pb is a factor of -1.
+dNdt = -dNdt
+dNdz = -dNdz
+
 I_ = float(booz_dict["bvco_b"].flat[k_diag])
 J_ = float(booz_dict["buco_b"].flat[k_diag])
+# iota_b is now aligned to the computed surfaces by _boozer_obj_to_dict
+# (was: flat[0] of the full-grid bx.iota, i.e. the axis value).
 iota = float(booz_dict["iota_b"].flat[k_diag])
-# py_iota_profile = lowlevel.get_iota_profile(ctx.handle)
-# iota = py_iota_profile[k_diag]
 fac = I_ + iota * J_
 gp_f = np.sqrt(np.abs((dRdt**2+dZdt**2+R**2*dNdt**2)*(dRdz**2+dZdz**2+R**2*(1+dNdz)**2)
                     -(dRdt*dRdz+dZdt*dZdz+R**2*dNdt*(1+dNdz))**2)) * B_f**2 / fac
