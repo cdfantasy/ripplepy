@@ -784,115 +784,115 @@ contains
 
     end subroutine geodesic_curvature_internal
 
-    subroutine effective_ripple_internal(fieldline_gradpsi_data, geocur, epsilon_eff)
-      implicit none
-      real(8), intent(in) :: fieldline_gradpsi_data(:, :)
-      real(8), intent(in) :: geocur(:)
-      real(8), intent(out) :: epsilon_eff
-
+!    subroutine effective_ripple_internal(fieldline_gradpsi_data, geocur, epsilon_eff)
+!      implicit none
+!      real(8), intent(in) :: fieldline_gradpsi_data(:, :)
+!      real(8), intent(in) :: geocur(:)
+!      real(8), intent(out) :: epsilon_eff
+!
       ! Local variables
-      integer :: i, j, k, n_b, n_w, npts
-      real(8) :: bmax, bmin, b0, dbp, bp,bphi
-      real(8) :: b, ds
-      real(8), allocatable :: h_i(:), h_j(:, :), i_j(:, :)
-      real(8) :: e1, e2, e3
-      real(8) :: r, dphi
-      real(8) :: grad_psi
-      real(8) :: sqrt_term
-
-      npts = size(fieldline_gradpsi_data, 1)
-
-      if (npts < 2) then
-        if (trace_verbose /= 0) write(*, '(A)') 'Error: Not enough data points for ripple calculation'
-        epsilon_eff = 0.0d0
-        return
-      end if
-      
-      
-      n_b = 5000
-      n_w = 5000
-      dphi = 2.0d0 * PI / real(nphi_trace, 8)
-      ds = 0.0d0
-      allocate(h_i(n_b), h_j(n_b, n_w), i_j(n_b, n_w))
-      h_i(:) = 0.0d0
-      h_j(:, :) = 0.0d0
-      i_j(:, :) = 0.0d0
-
-      bmax = fieldline_gradpsi_data(1, 7)
-      bmin = fieldline_gradpsi_data(1, 7)
-      do i = 1, npts
-        if (fieldline_gradpsi_data(i, 7) > bmax) bmax = fieldline_gradpsi_data(i, 7)
-        if (fieldline_gradpsi_data(i, 7) < bmin) bmin = fieldline_gradpsi_data(i, 7)
-      end do
-      
-      if (bmax < 1.0d-15 .or. bmax <= bmin) then
-        if (trace_verbose /= 0) write(*, '(A)') 'Error: Invalid magnetic field range'
-        epsilon_eff = 0.0d0
-        deallocate(h_i, h_j, i_j)
-        return
-      end if
-
-      b0 = bmax
-      dbp = (bmax - bmin) / (real(n_b - 1, 8) * b0)
-
-      do j = 1, n_b
-        h_j(j, :) = 0.0d0
-        i_j(j, :) = 0.0d0
-        h_i(j) = 0.0d0
-        k = 1
-        bp = bmin / b0 + real(j - 1, 8) * dbp
-
-        do i = 1, npts
-          b = fieldline_gradpsi_data(i, 7)
-          r = fieldline_gradpsi_data(i, 1)
-          bphi = fieldline_gradpsi_data(i, 6)
-          grad_psi = fieldline_gradpsi_data(i, 11)
-          
-          if (b < 1.0d-15 .or. grad_psi < 1.0d-15 .or. abs(bphi) < 1.0d-15) cycle
-          
-          if (i < npts) then
-            ds = r * b / abs(bphi) * dphi
-          else
-            ds = 0.0d0
-          end if
-
-          if (bp > b / b0) then
-            sqrt_term = bp - b / b0
-            if (sqrt_term > 0.0d0) then
-              h_j(j, k) = h_j(j, k) + 1.0d0 / bp * ds / b * sqrt(sqrt_term) &
-                        * (4.0d0 * b0 / b - 1.0d0 / bp) * abs(grad_psi) * geocur(i)
-            end if
-            
-            sqrt_term = 1.0d0 - b / (b0 * bp)
-            if (sqrt_term > 0.0d0) then
-              i_j(j, k) = i_j(j, k) + ds / b * sqrt(sqrt_term)
-            end if
-            
-            if (i < npts) then
-              if (bp < fieldline_gradpsi_data(i+1, 7) / b0) then
-                if (i_j(j, k) > 1.0d-15) then
-                  h_i(j) = h_i(j) + h_j(j, k)**2 / i_j(j, k)
-                end if
-                k = k + 1
-                if (k > n_w) exit
-              end if
-            else
-              if (i_j(j, k) > 1.0d-15) then
-                h_i(j) = h_i(j) + h_j(j, k)**2 / i_j(j, k)
-              end if
-            end if
-          end if
-        end do
-      end do
-
-      e1 = 0.0d0
-      e2 = 0.0d0
-      e3 = 0.0d0
-
-      do i = 1, n_b
-        e1 = e1 + h_i(i) * dbp
-      end do
-      
+!      integer :: i, j, k, n_b, n_w, npts
+!      real(8) :: bmax, bmin, b0, dbp, bp,bphi
+!      real(8) :: b, ds
+!      real(8), allocatable :: h_i(:), h_j(:, :), i_j(:, :)
+!      real(8) :: e1, e2, e3
+!      real(8) :: r, dphi
+!      real(8) :: grad_psi
+!      real(8) :: sqrt_term
+!
+!      npts = size(fieldline_gradpsi_data, 1)
+!
+!      if (npts < 2) then
+!        if (trace_verbose /= 0) write(*, '(A)') 'Error: Not enough data points for ripple calculation'
+!        epsilon_eff = 0.0d0
+!        return
+!      end if
+!      
+!      
+!      n_b = 5000
+!      n_w = 5000
+!      dphi = 2.0d0 * PI / real(nphi_trace, 8)
+!      ds = 0.0d0
+!      allocate(h_i(n_b), h_j(n_b, n_w), i_j(n_b, n_w))
+!      h_i(:) = 0.0d0
+!      h_j(:, :) = 0.0d0
+!      i_j(:, :) = 0.0d0
+!
+!      bmax = fieldline_gradpsi_data(1, 7)
+!      bmin = fieldline_gradpsi_data(1, 7)
+!      do i = 1, npts
+!        if (fieldline_gradpsi_data(i, 7) > bmax) bmax = fieldline_gradpsi_data(i, 7)
+!        if (fieldline_gradpsi_data(i, 7) < bmin) bmin = fieldline_gradpsi_data(i, 7)
+!      end do
+!      
+!      if (bmax < 1.0d-15 .or. bmax <= bmin) then
+!        if (trace_verbose /= 0) write(*, '(A)') 'Error: Invalid magnetic field range'
+!        epsilon_eff = 0.0d0
+!        deallocate(h_i, h_j, i_j)
+!        return
+!      end if
+!
+!      b0 = bmax
+!      dbp = (bmax - bmin) / (real(n_b - 1, 8) * b0)
+!
+!      do j = 1, n_b
+!        h_j(j, :) = 0.0d0
+!        i_j(j, :) = 0.0d0
+!        h_i(j) = 0.0d0
+!        k = 1
+!        bp = bmin / b0 + real(j - 1, 8) * dbp
+!
+!        do i = 1, npts
+!          b = fieldline_gradpsi_data(i, 7)
+!          r = fieldline_gradpsi_data(i, 1)
+!          bphi = fieldline_gradpsi_data(i, 6)
+!          grad_psi = fieldline_gradpsi_data(i, 11)
+!          
+!          if (b < 1.0d-15 .or. grad_psi < 1.0d-15 .or. abs(bphi) < 1.0d-15) cycle
+!          
+!          if (i < npts) then
+!            ds = r * b / abs(bphi) * dphi
+!          else
+!            ds = 0.0d0
+!          end if
+!
+!          if (bp > b / b0) then
+!            sqrt_term = bp - b / b0
+!            if (sqrt_term > 0.0d0) then
+!              h_j(j, k) = h_j(j, k) + 1.0d0 / bp * ds / b * sqrt(sqrt_term) &
+!                        * (4.0d0 * b0 / b - 1.0d0 / bp) * abs(grad_psi) * geocur(i)
+!            end if
+!            
+!            sqrt_term = 1.0d0 - b / (b0 * bp)
+!            if (sqrt_term > 0.0d0) then
+!              i_j(j, k) = i_j(j, k) + ds / b * sqrt(sqrt_term)
+!            end if
+!            
+!            if (i < npts) then
+!              if (bp < fieldline_gradpsi_data(i+1, 7) / b0) then
+!                if (i_j(j, k) > 1.0d-15) then
+!                  h_i(j) = h_i(j) + h_j(j, k)**2 / i_j(j, k)
+!                end if
+!                k = k + 1
+!                if (k > n_w) exit
+!              end if
+!            else
+!              if (i_j(j, k) > 1.0d-15) then
+!                h_i(j) = h_i(j) + h_j(j, k)**2 / i_j(j, k)
+!              end if
+!            end if
+!          end if
+!        end do
+!      end do
+!
+!      e1 = 0.0d0
+!      e2 = 0.0d0
+!      e3 = 0.0d0
+!
+!      do i = 1, n_b
+!        e1 = e1 + h_i(i) * dbp
+!      end do
+!      
       ! ! DEBUG: Check h_i distribution
       ! block
       !   integer :: n_nonzero_h
@@ -901,7 +901,7 @@ contains
       !   h_i_min = 1.0d30
       !   h_i_max = 0.0d0
       !   h_i_sum_check = 0.0d0
-        
+!        
       !   do i = 1, n_b
       !     if (h_i(i) > 1.0d-20) then
       !       n_nonzero_h = n_nonzero_h + 1
@@ -910,7 +910,7 @@ contains
       !     end if
       !     h_i_sum_check = h_i_sum_check + abs(h_i(i))
       !   end do
-        
+!        
       !   write(*, '(A)') '========== DEBUG: b-prime scan results =========='
       !   write(*, '(A, I0, A, I0)') 'nonzero h_i: ', n_nonzero_h, ' / ', n_b
       !   write(*, '(A, E15.6)') 'h_i min (nonzero) = ', h_i_min
@@ -918,25 +918,25 @@ contains
       !   write(*, '(A, E15.6)') 'e1 (before dbp scaling) ≈ ', h_i_sum_check / real(n_b, 8)
       !   write(*, '(A)') '================================================'
       ! end block
-
-      do i = 1, npts
-        b = fieldline_gradpsi_data(i, 7)
-        r = fieldline_gradpsi_data(i, 1)
-        grad_psi = fieldline_gradpsi_data(i, 11)
-        bphi = fieldline_gradpsi_data(i, 6)
-        
-        if (b < 1.0d-15 .or. grad_psi < 1.0d-15 .or. abs(bphi) < 1.0d-15) cycle
-        
-        if (i < npts) then
-          ds = r * b / abs(bphi) * dphi
-        else
-          ds = 0.0d0
-        end if
-        
-        e2 = e2 + ds / b
-        e3 = e3 + ds / b * abs(grad_psi)
-      end do
-
+!
+!      do i = 1, npts
+!        b = fieldline_gradpsi_data(i, 7)
+!        r = fieldline_gradpsi_data(i, 1)
+!        grad_psi = fieldline_gradpsi_data(i, 11)
+!        bphi = fieldline_gradpsi_data(i, 6)
+!        
+!        if (b < 1.0d-15 .or. grad_psi < 1.0d-15 .or. abs(bphi) < 1.0d-15) cycle
+!        
+!        if (i < npts) then
+!          ds = r * b / abs(bphi) * dphi
+!        else
+!          ds = 0.0d0
+!        end if
+!        
+!        e2 = e2 + ds / b
+!        e3 = e3 + ds / b * abs(grad_psi)
+!      end do
+!
       ! ! DEBUG: Print intermediate values
       ! write(*, '(A)') '========== DEBUG: effective_ripple_internal =========='
       ! write(*, '(A, E15.6)') 'e1 (H^2/I integral over b'') = ', e1
@@ -944,16 +944,16 @@ contains
       ! write(*, '(A, E15.6)') 'e3 (integral ds/B |grad_psi|) = ', e3
       ! write(*, '(A, I0, A, I0)') 'n_b samples processed: ', n_b, ', n_w max width: ', n_w
       ! write(*, '(A)') '======================================================'
-
-      if (e3 > 1.0d-15 .and. e2 > 1.0d-15) then
-        epsilon_eff = (e1 * e2 / (e3**2)) * (PI * 1d0**2) / (8.0d0 * sqrt(2.0d0))
-      else
-        epsilon_eff = 0.0d0
-      end if
-
-      deallocate(h_i, h_j, i_j)
-
-    end subroutine effective_ripple_internal
+!
+!      if (e3 > 1.0d-15 .and. e2 > 1.0d-15) then
+!        epsilon_eff = (e1 * e2 / (e3**2)) * (PI * 1d0**2) / (8.0d0 * sqrt(2.0d0))
+!      else
+!        epsilon_eff = 0.0d0
+!      end if
+!
+!      deallocate(h_i, h_j, i_j)
+!
+!    end subroutine effective_ripple_internal
 
 !=======================================================================
 ! pyneo-style η-state integration (matches rhs_bo1.f90 + flint_bo.f90)
@@ -1221,117 +1221,117 @@ contains
 !=======================================================================
 ! Gauss-Legendre 节点和权重 (区间 [0,1])
 !=======================================================================
-subroutine gauss_legendre_01(ng, x, w)
-    implicit none
-    integer, intent(in)  :: ng
-    real(8), intent(out) :: x(ng), w(ng)
-    real(8), allocatable :: xt(:), wt(:)
-
-    allocate(xt(ng), wt(ng))
-    call gauleg(-1.0d0, 1.0d0, xt, wt, ng)
-    
-    x = 0.5d0 * (xt + 1.0d0)
-    w = 0.5d0 * wt
-    
-    deallocate(xt, wt)
-end subroutine gauss_legendre_01
+!subroutine gauss_legendre_01(ng, x, w)
+!    implicit none
+!    integer, intent(in)  :: ng
+!    real(8), intent(out) :: x(ng), w(ng)
+!    real(8), allocatable :: xt(:), wt(:)
+!
+!    allocate(xt(ng), wt(ng))
+!    call gauleg(-1.0d0, 1.0d0, xt, wt, ng)
+!    
+!    x = 0.5d0 * (xt + 1.0d0)
+!    w = 0.5d0 * wt
+!    
+!    deallocate(xt, wt)
+!end subroutine gauss_legendre_01
 
 !=======================================================================
 ! 经典 Gauss-Legendre (区间 [-1,1])
 !=======================================================================
-subroutine gauleg(x1, x2, x, w, n)
-    implicit none
-    real(8), intent(in)  :: x1, x2
-    integer, intent(in)  :: n
-    real(8), intent(out) :: x(n), w(n)
-
-    integer, parameter :: MAXIT = 20
-    real(8), parameter :: EPS = 3.0d-14
-    integer :: i, j, k, m
-    real(8) :: xm, xl, z, z1, p1, p2, p3, pp
-
-    m = (n + 1)/2
-    xm = 0.5d0*(x2 + x1)
-    xl = 0.5d0*(x2 - x1)
-
-    do i = 1, m
-        z = cos(PI * (real(i,8) - 0.25d0) / (real(n,8) + 0.5d0))
-        do j = 1, MAXIT
-            p1 = 1.0d0; p2 = 0.0d0
-            do k = 1, n
-                p3 = p2
-                p2 = p1
-                p1 = ((2.0d0*k - 1.0d0)*z*p2 - (k-1.0d0)*p3) / real(k,8)
-            end do
-            pp = n * (z*p1 - p2) / (z*z - 1.0d0)
-            z1 = z
-            z  = z1 - p1/pp
-            if (abs(z - z1) < EPS) exit
-        end do
-        x(i)     = xm - xl*z
-        x(n+1-i) = xm + xl*z
-        w(i)     = 2.0d0*xl / ((1.0d0 - z*z)*pp*pp)
-        w(n+1-i) = w(i)
-    end do
-end subroutine gauleg
+!subroutine gauleg(x1, x2, x, w, n)
+!    implicit none
+!    real(8), intent(in)  :: x1, x2
+!    integer, intent(in)  :: n
+!    real(8), intent(out) :: x(n), w(n)
+!
+!    integer, parameter :: MAXIT = 20
+!    real(8), parameter :: EPS = 3.0d-14
+!    integer :: i, j, k, m
+!    real(8) :: xm, xl, z, z1, p1, p2, p3, pp
+!
+!    m = (n + 1)/2
+!    xm = 0.5d0*(x2 + x1)
+!    xl = 0.5d0*(x2 - x1)
+!
+!    do i = 1, m
+!        z = cos(PI * (real(i,8) - 0.25d0) / (real(n,8) + 0.5d0))
+!        do j = 1, MAXIT
+!            p1 = 1.0d0; p2 = 0.0d0
+!            do k = 1, n
+!                p3 = p2
+!                p2 = p1
+!                p1 = ((2.0d0*k - 1.0d0)*z*p2 - (k-1.0d0)*p3) / real(k,8)
+!            end do
+!            pp = n * (z*p1 - p2) / (z*z - 1.0d0)
+!            z1 = z
+!            z  = z1 - p1/pp
+!            if (abs(z - z1) < EPS) exit
+!        end do
+!        x(i)     = xm - xl*z
+!        x(n+1-i) = xm + xl*z
+!        w(i)     = 2.0d0*xl / ((1.0d0 - z*z)*pp*pp)
+!        w(n+1-i) = w(i)
+!    end do
+!end subroutine gauleg
 
 !=======================================================================
 ! 查找 B 的局部极小值索引
 !=======================================================================
-subroutine find_local_minima(B, idx, n)
-    real(8), intent(in) :: B(:)
-    integer, allocatable, intent(out) :: idx(:)
-    integer, intent(out) :: n
-
-    integer :: i, m, count
-    m = size(B)
-    allocate(idx(m+2))
-
-    idx(1) = 1
-    count = 1
-
-    do i = 2, m-1
-        if (B(i) < B(i-1) .and. B(i) < B(i+1)) then
-            count = count + 1
-            idx(count) = i
-        end if
-    end do
-
-    idx(count+1) = m
-    n = count + 1
-end subroutine find_local_minima
+!subroutine find_local_minima(B, idx, n)
+!    real(8), intent(in) :: B(:)
+!    integer, allocatable, intent(out) :: idx(:)
+!    integer, intent(out) :: n
+!
+!    integer :: i, m, count
+!    m = size(B)
+!    allocate(idx(m+2))
+!
+!    idx(1) = 1
+!    count = 1
+!
+!    do i = 2, m-1
+!        if (B(i) < B(i-1) .and. B(i) < B(i+1)) then
+!            count = count + 1
+!            idx(count) = i
+!        end if
+!    end do
+!
+!    idx(count+1) = m
+!    n = count + 1
+!end subroutine find_local_minima
 
 !=======================================================================
 ! 单弹跳段积分
 !=======================================================================
-subroutine integrate_bounce_segment(bp, i1, i2, B, gp, kg, ds_over_B, b0_ref, Hout, Iout)
-    real(8), intent(in) :: bp, b0_ref
-    integer, intent(in) :: i1, i2
-    real(8), intent(in) :: B(:), gp(:), kg(:), ds_over_B(:)
-    real(8), intent(out) :: Hout, Iout
-
-    integer :: k
-    real(8) :: b_loc, sqrtH, sqrtI, termH, termI
-
-    Hout = 0.0d0
-    Iout = 0.0d0
-
-    do k = i1, i2-1
-        b_loc = B(k) / b0_ref
-        if (bp <= b_loc) cycle
-
-        sqrtH = sqrt(max(0.0d0, bp - b_loc))
-        sqrtI = sqrt(max(0.0d0, 1.0d0 - b_loc/bp))
-
-        termH = (1.0d0/bp) * ds_over_B(k) * sqrtH * &
-                (4.0d0*b0_ref/B(k) - 1.0d0/bp) * gp(k) * kg(k)
-
-        termI = ds_over_B(k) * sqrtI
-
-        Hout = Hout + termH
-        Iout = Iout + termI
-    end do
-end subroutine
+!subroutine integrate_bounce_segment(bp, i1, i2, B, gp, kg, ds_over_B, b0_ref, Hout, Iout)
+!    real(8), intent(in) :: bp, b0_ref
+!    integer, intent(in) :: i1, i2
+!    real(8), intent(in) :: B(:), gp(:), kg(:), ds_over_B(:)
+!    real(8), intent(out) :: Hout, Iout
+!
+!    integer :: k
+!    real(8) :: b_loc, sqrtH, sqrtI, termH, termI
+!
+!    Hout = 0.0d0
+!    Iout = 0.0d0
+!
+!    do k = i1, i2-1
+!        b_loc = B(k) / b0_ref
+!        if (bp <= b_loc) cycle
+!
+!        sqrtH = sqrt(max(0.0d0, bp - b_loc))
+!        sqrtI = sqrt(max(0.0d0, 1.0d0 - b_loc/bp))
+!
+!        termH = (1.0d0/bp) * ds_over_B(k) * sqrtH * &
+!                (4.0d0*b0_ref/B(k) - 1.0d0/bp) * gp(k) * kg(k)
+!
+!        termI = ds_over_B(k) * sqrtI
+!
+!        Hout = Hout + termH
+!        Iout = Iout + termI
+!    end do
+!end subroutine
 
 !=======================================================================
 ! Compute effective major radius R0 from field line data.

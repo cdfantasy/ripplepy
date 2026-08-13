@@ -40,7 +40,7 @@ NTURN = 100
 NSTEP_PER = 50    # pyneo: RK4 steps per field period (matches ctx transport options)
 NPHI =200        # baseline grid pts per turn; f90 uses NPHI_F90 below
 NPART = 500
-COMPARE_PYTHON = True            # True → also run Python η-state-machine + diagnostics
+COMPARE_PYTHON = False           # True → also run Python η-state-machine + diagnostics
 CACHE_FIELDLINE = False
 CACHE_DIR = Path(__file__).resolve().parent / "fieldline_cache"
 
@@ -189,7 +189,7 @@ def main():
     print(f"  {DEVICE} — ε_eff^(3/2) comparison")
     print(f"  {'─'*60}")
     if COMPARE_PYTHON:
-        print(f"  {'s':>8s}  {'pyneo':>12s}  {'booz→f90':>12s}  {'booz→py':>12s}  {'f90/pyneo':>9s}  {'py/pyneo':>9s}  {'f90/py':>9s}")
+        print(f"  {'s':>8s}  {'pyneo':>12s}  {'booz-ripplepy':>12s}  {'booz→py':>12s}  {'f90/pyneo':>9s}  {'py/pyneo':>9s}  {'f90/py':>9s}")
         print(f"  {'─'*8}  {'─'*12}  {'─'*12}  {'─'*12}  {'─'*9}  {'─'*9}  {'─'*9}")
         for i, s_val in enumerate(SURF_IDX_LIST):
             r_f90 = eps_bf[i]/py_eps[i]; r_py = eps_bp[i]/py_eps[i]
@@ -198,7 +198,7 @@ def main():
                   f"{eps_bf[i]:12.4e}  {eps_bp[i]:12.4e}  "
                   f"{r_f90:9.4f}  {r_py:9.4f}  {r_f90_py:9.4f}")
     else:
-        print(f"  {'s':>8s}  {'pyneo':>12s}  {'booz→f90':>12s}  {'f90/pyneo':>8s}")
+        print(f"  {'s':>8s}  {'pyneo':>12s}  {'booz-ripplepy':>12s}  {'f90/pyneo':>8s}")
         print(f"  {'─'*8}  {'─'*12}  {'─'*12}  {'─'*8}")
         for i, s_val in enumerate(SURF_IDX_LIST):
             r_f90 = eps_bf[i]/py_eps[i]

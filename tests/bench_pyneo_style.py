@@ -65,7 +65,7 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
     print(f'major radius from vmec: {R0_vmec:.4f}, from ripplepy: {R0_rp:.4f}')
     print("  Running ripplepy ...")
     set_trace_parameters(nturn, nphi, npart=npart, verbose=False)
-    rp_new = []
+    ripplepy = []
     
     def _compute_one(rz):
         eps, bnd, ist = compute_epstot(
@@ -81,7 +81,7 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
         for fut in as_completed(futures):
             i = futures[fut]
             results[i] = fut.result()
-    rp_new = results
+    ripplepy = results
     
     # ── ripplepy (old) ──
     if py_old:
@@ -93,45 +93,45 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
                                         np.array([1,0,0], dtype=np.float64))
             rp_old.append(eps)
         print(f"\n  {'s':>6s}  {'pyneo':>12s} {'py_old':>12s} {'old/py':>8s}"
-            f"{'rp_new':>12s}  {'new/py':>8s}")
+            f"{'ripplepy':>12s}  {'new/py':>8s}")
         print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8} {'-'*12}  {'-'*8}")
         for i in range(len(sur_idx)):
-            n = rp_new[i] / py_eps[i] if py_eps[i] != 0 else np.nan
+            n = ripplepy[i] / py_eps[i] if py_eps[i] != 0 else np.nan
             o = rp_old[i] / py_eps[i] if py_eps[i] != 0 else np.nan
             print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  {rp_old[i]:12.4e}  {o:8.4f}"
-                f"{rp_new[i]:12.4e}  {n:8.4f}")        
+                f"{ripplepy[i]:12.4e}  {n:8.4f}")        
         from matplotlib import pyplot as plt
         plt.figure(figsize=(8,6))
         plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
         plt.plot(sur_idx, rp_old, 'x-', label='ripplepy(old)')
-        plt.plot(sur_idx, rp_new, 'x-', label='ripplepy (new pyneo-style)')
+        plt.plot(sur_idx, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
         plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
         plt.title(f"{name} Benchmark: eps_tot vs s")
         plt.tight_layout(); plt.show()
 
         
-        return py_eps,rp_old, rp_new        
+        return py_eps,rp_old, ripplepy        
     # ── ripplepy (new pyneo-style) ──
 
     else:
         print(f"\n  {'s':>6s}  {'pyneo':>12s}  "
-            f"{'rp_new':>12s}  {'new/py':>8s}")
+            f"{'ripplepy':>12s}  {'new/py':>8s}")
         print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8}")
         for i in range(len(sur_idx)):
-            n = rp_new[i] / py_eps[i] if py_eps[i] != 0 else np.nan
+            n = ripplepy[i] / py_eps[i] if py_eps[i] != 0 else np.nan
             print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  "
-                f"{rp_new[i]:12.4e}  {n:8.4f}")        
+                f"{ripplepy[i]:12.4e}  {n:8.4f}")        
     # plot
         from matplotlib import pyplot as plt
         plt.figure(figsize=(8,6))
         plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
-        plt.plot(sur_idx, rp_new, 'x-', label='ripplepy (new pyneo-style)')
+        plt.plot(sur_idx, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
         plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
         plt.title(f"{name} Benchmark: eps_tot vs s")
         plt.tight_layout(); plt.show()
 
         
-        return py_eps, rp_new
+        return py_eps, ripplepy
 
 
 BASE = str(Path(__file__).resolve().parent.parent)
