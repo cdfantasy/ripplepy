@@ -4,7 +4,7 @@ ripplepy.optimize - Stellarator coil-current optimization via Differential Evolu
 Provides:
   • OptimizationConfig     — typed parameter container (dataclass)
   • StellaratorObjective   — objective function wrapper with error classification
-  • DifferentialEvolution  — main DE engine with checkpointing & logging
+  • DifferentialEvolution  — main DE engine with parallel evaluation & logging
   • run()                  — convenience entry point
   • Legacy functional API  — backward-compatible wrappers
 """
@@ -144,8 +144,6 @@ class OptimizationConfig:
         Optional device label used in output filenames.
     seed : int or None
         Random seed for reproducibility.
-    checkpoint_interval : int
-        Save checkpoint every N generations (0 = disable).
     log_file : str or Path or None
         Path to structured log file.
     log_level : int
@@ -154,8 +152,6 @@ class OptimizationConfig:
         Early-stop tolerance on best-fitness change (disabled if None).
     patience : int
         Generations to wait after ftol triggers before stopping.
-    restart_best : ndarray or None
-        If provided, seed this individual into the initial population.
     """
     mgrid_path: str
     nfp: int
@@ -175,12 +171,10 @@ class OptimizationConfig:
     csv_filename: str = "Individual_info_list.csv"
     device_name: Optional[str] = None
     seed: Optional[int] = None
-    checkpoint_interval: int = 10
     log_file: Optional[Path] = None
     log_level: int = logging.INFO
     ftol: Optional[float] = None
     patience: int = 10
-    restart_best: Optional[np.ndarray] = None
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
@@ -190,8 +184,6 @@ class OptimizationConfig:
             val = getattr(self, arr_name)
             if val is not None:
                 setattr(self, arr_name, np.asarray(val, dtype=np.float64))
-        if self.restart_best is not None:
-            self.restart_best = np.asarray(self.restart_best, dtype=np.float64)
 
         # ── Convert relative bounds [nominal, fraction] → absolute [lo, hi] ─
         #   fraction = 0  → locked at nominal (lo == hi)
@@ -246,7 +238,7 @@ class StellaratorObjective:
         self.cfg = config
 
     def evaluate(self, extcur_free: np.ndarray, gen: int, ind_idx: int
-                 ) -> tuple[float, dict, np.ndarray]:
+                 ) -> tuple[float, dict]:
         """Run the full evaluation chain.
 
         Returns
@@ -255,8 +247,6 @@ class StellaratorObjective:
             ε_eff (1e4 on failure).
         info : dict
             Metadata dict (Generation, Individual, extcur, epsilon_eff, …).
-        fieldline_data : ndarray
-            Raw field-line trace (shape (0, 20) on failure).
         """
         # Initialise mgrid once per process (critical for macOS spawn —
         # pickle does NOT re-run __init__ in the worker).
@@ -301,7 +291,7 @@ class StellaratorObjective:
             info["failure_type"] = FailureType.AXIS_NOT_FOUND.value
             info["failure_message"] = "Magnetic axis not found"
             logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
-            return self.INVALID_FITNESS, info, np.zeros((0, 20), dtype=np.float64)
+            return self.INVALID_FITNESS, info
 
         # --- compute initial grad-psi ---
         RZ = np.array(
@@ -323,13 +313,13 @@ class StellaratorObjective:
             info["failure_type"] = FailureType.TRACING_FAILED.value
             info["failure_message"] = f"Field-line tracing failed (istate={trace_istate})"
             logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
-            return self.INVALID_FITNESS, info, fieldline_data
+            return self.INVALID_FITNESS, info
 
         if np.isnan(epsilon_eff) or np.isinf(epsilon_eff):
             info["failure_type"] = FailureType.EPSILON_NAN.value
             info["failure_message"] = f"epsilon_eff is {epsilon_eff}"
             logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
-            return self.INVALID_FITNESS, info, fieldline_data
+            return self.INVALID_FITNESS, info
 
         # --- plasma parameters ---
         try:
@@ -355,7 +345,7 @@ class StellaratorObjective:
         info["average B"] = float(
             bboundary[0] if hasattr(bboundary, "__len__") else bboundary
         )
-        return float(epsilon_eff), info, fieldline_data
+        return float(epsilon_eff), info
 
 
 # ---------------------------------------------------------------------------
@@ -439,81 +429,6 @@ def save_csv(individual_infos: list[dict], filename: Path):
 
 
 # ---------------------------------------------------------------------------
-# Checkpoint
-# ---------------------------------------------------------------------------
-
-class CheckpointManager:
-    """Save/restore the optimisation state for crash recovery and hot-restart."""
-
-    def __init__(self, directory: Path, device_name: Optional[str] = None):
-        self.directory = Path(directory)
-        self.directory.mkdir(parents=True, exist_ok=True)
-        self._prefix = f"{device_name}_" if device_name else ""
-
-    @property
-    def checkpoint_path(self) -> Path:
-        return self.directory / f"{self._prefix}checkpoint.npz"
-
-    def save(self, gen: int, pop: list, fitnesses: list[float],
-             invalid_count: list[int], rng_state, config: OptimizationConfig):
-        """Persist the full optimisation state."""
-        np.savez(
-            self.checkpoint_path,
-            gen=gen,
-            pop=np.asarray(pop, dtype=np.float64),
-            fitnesses=np.asarray(fitnesses, dtype=np.float64),
-            invalid_count=np.asarray(invalid_count, dtype=np.int32),
-            rng_state=np.asarray(rng_state, dtype=np.uint32),
-            # Store config metadata so we can validate on restore
-            n_pop=config.n_pop,
-            n_dim=len(config.initial_bounds),
-            max_gen=config.max_gen,
-        )
-        logger.info("Checkpoint saved at generation %d → %s", gen, self.checkpoint_path)
-
-    def load(self) -> Optional[dict]:
-        """Load checkpoint; return None if no valid checkpoint exists."""
-        path = self.checkpoint_path
-        if not path.exists():
-            logger.info("No checkpoint found at %s", path)
-            return None
-        try:
-            data = np.load(path)
-            logger.info("Checkpoint loaded from %s (gen %d)", path, int(data["gen"]))
-            return {
-                "gen": int(data["gen"]),
-                "pop": list(data["pop"]),
-                "fitnesses": list(data["fitnesses"]),
-                "invalid_count": list(data["invalid_count"]),
-                "rng_state": data["rng_state"],
-            }
-        except Exception as exc:
-            logger.warning("Failed to load checkpoint: %s", exc)
-            return None
-
-    def remove(self):
-        """Delete the checkpoint file (call after successful completion)."""
-        path = self.checkpoint_path
-        if path.exists():
-            path.unlink()
-            logger.debug("Checkpoint file removed.")
-
-    @staticmethod
-    def load_best_from_run(run_dir: Path, device_name: Optional[str] = None
-                           ) -> Optional[np.ndarray]:
-        """Extract the best individual from a previous run's checkpoint, for seeding."""
-        mgr = CheckpointManager(run_dir, device_name)
-        state = mgr.load()
-        if state is None:
-            return None
-        fitnesses = state["fitnesses"]
-        pop = state["pop"]
-        best_idx = int(np.argmin(fitnesses))
-        logger.info("Loaded best individual from checkpoint (fitness=%.6e)", fitnesses[best_idx])
-        return np.asarray(pop[best_idx], dtype=np.float64)
-
-
-# ---------------------------------------------------------------------------
 # DE core
 # ---------------------------------------------------------------------------
 
@@ -526,7 +441,6 @@ class DifferentialEvolution:
 
         self.n_dim = len(config.initial_bounds)
         self.objective = StellaratorObjective(config)
-        self.checkpointer = CheckpointManager(config.output_dir, config.device_name)
 
         # Population state
         self.pop: list[np.ndarray] = []
@@ -571,36 +485,28 @@ class DifferentialEvolution:
 
     def _run_with_pool(self) -> tuple[np.ndarray, float, list[dict]]:
         """Inner optimisation loop (pool is guaranteed to exist)."""
-        start_gen, restored = self._try_restore()
+        logger.info("Starting fresh optimisation")
 
-        if restored:
-            logger.info("Resuming from generation %d", start_gen)
+        # ── Evaluate the nominal extcur as a "start" baseline ──────────
+        nominal_extcur = self.cfg.initial_bounds[:, 0].copy()
+        logger.info(
+            "Evaluating nominal extcur baseline: %s", nominal_extcur)
+        start_fit, start_info = self.objective.evaluate(
+            nominal_extcur, gen="start", ind_idx=0)
+        self.all_infos.append(start_info)
+        if start_fit >= StellaratorObjective.INVALID_FITNESS:
+            logger.warning(
+                "Nominal extcur evaluation FAILED (fitness=%.1f).  "
+                "Optimisation will proceed but the baseline is invalid.",
+                start_fit)
         else:
-            logger.info("Starting fresh optimisation")
+            logger.info("Nominal baseline ε = %.6e", start_fit)
 
-            # ── Evaluate the nominal extcur as a "start" baseline ──────────
-            nominal_extcur = self.cfg.initial_bounds[:, 0].copy()
-            logger.info(
-                "Evaluating nominal extcur baseline: %s", nominal_extcur)
-            start_fit, start_info, start_fd = self.objective.evaluate(
-                nominal_extcur, gen="start", ind_idx=0)
-            self.all_infos.append(start_info)
-            save_hdf5(start_info, start_fd,
-                      self.cfg.output_dir, self.cfg.device_name, tag="start")
-            if start_fit >= StellaratorObjective.INVALID_FITNESS:
-                logger.warning(
-                    "Nominal extcur evaluation FAILED (fitness=%.1f).  "
-                    "Optimisation will proceed but the baseline is invalid.",
-                    start_fit)
-            else:
-                logger.info("Nominal baseline ε = %.6e", start_fit)
-
-            self._init_population()
-            self._evaluate_and_record(self.pop, gen=0, is_initial=True)
-            start_gen = 1
+        self._init_population()
+        self._evaluate_and_record(self.pop, gen=0)
 
         # ---- main loop ----
-        for gen in range(start_gen, self.cfg.max_gen + 1):
+        for gen in range(1, self.cfg.max_gen + 1):
             t0 = time.perf_counter()
 
             # 1. Generate trial vectors
@@ -611,9 +517,7 @@ class DifferentialEvolution:
                 trials.append(trial)
 
             # 2. Evaluate
-            trial_fitnesses, trial_infos, trial_fieldlines = self._evaluate_batch(
-                trials, gen
-            )
+            trial_fitnesses, trial_infos = self._evaluate_batch(trials, gen)
 
             # 3. Selection
             invalid_solutions = 0
@@ -629,11 +533,10 @@ class DifferentialEvolution:
                 if self.invalid_count[i] >= 3:
                     # Re-initialise this individual
                     new_ind = self._init_individual()
-                    new_fit, new_info, new_fd = self.objective.evaluate(new_ind, gen, i)
+                    new_fit, new_info = self.objective.evaluate(new_ind, gen, i)
                     self.pop[i] = new_ind
                     self.fitnesses[i] = new_fit
                     self.all_infos.append(new_info)
-                    save_hdf5(new_info, new_fd, self.cfg.output_dir, self.cfg.device_name)
                     self.invalid_count[i] = 0
                     logger.info(
                         "Gen %d, Ind %d: re-initialised (fitness=%.6e)",
@@ -643,8 +546,6 @@ class DifferentialEvolution:
                     self.pop[i] = trials[i]
                     self.fitnesses[i] = tf
                     self.all_infos.append(trial_infos[i])
-                    save_hdf5(trial_infos[i], trial_fieldlines[i],
-                              self.cfg.output_dir, self.cfg.device_name)
 
                 if tf >= StellaratorObjective.INVALID_FITNESS:
                     invalid_solutions += 1
@@ -667,14 +568,7 @@ class DifferentialEvolution:
                                 formatter={'float_kind': lambda x: '%.1f' % x}),
             )
 
-            # 5. Checkpoint
-            if self.cfg.checkpoint_interval > 0 and gen % self.cfg.checkpoint_interval == 0:
-                self.checkpointer.save(
-                    gen, self.pop, self.fitnesses, self.invalid_count,
-                    self._rng_state(), self.cfg,
-                )
-
-            # 6. Early stop via ftol
+            # 5. Early stop via ftol
             if self._check_convergence(gen):
                 logger.info(
                     "Convergence reached: fitness change < %.1e for %d generations",
@@ -688,7 +582,6 @@ class DifferentialEvolution:
         best_fitness = self.fitnesses[best_idx]
 
         save_csv(self.all_infos, self.cfg.output_dir / self.cfg.csv_filename)
-        self.checkpointer.remove()
 
         logger.info(
             "Optimisation finished. Best fitness = %.6e at index %d",
@@ -709,14 +602,6 @@ class DifferentialEvolution:
         self.pop = [self._init_individual() for _ in range(self.cfg.n_pop)]
         self.fitnesses = []
         self.invalid_count = [0] * self.cfg.n_pop
-
-        # Seed with a known good individual if provided
-        if self.cfg.restart_best is not None:
-            self.pop[0] = self.cfg.restart_best.copy()
-            logger.info(
-                "Seeded best individual from restart into population[0]: %s",
-                self.cfg.restart_best,
-            )
 
     # ---- DE operators ------------------------------------------------------
 
@@ -748,56 +633,24 @@ class DifferentialEvolution:
     # ---- evaluation --------------------------------------------------------
 
     def _evaluate_batch(self, population: list[np.ndarray], gen: int
-                        ) -> tuple[list[float], list[dict], list[np.ndarray]]:
+                        ) -> tuple[list[float], list[dict]]:
         """Evaluate a population using the persistent process pool."""
         evaluate_func = self.objective.evaluate
         args = [(ind, gen, i) for i, ind in enumerate(population)]
         results = self._pool.starmap(evaluate_func, args)
 
-        fitnesses, infos, fieldlines = [], [], []
-        for fit, info, fd in results:
+        fitnesses, infos = [], []
+        for fit, info in results:
             fitnesses.append(float(fit))
             infos.append(info)
-            fieldlines.append(fd)
-        return fitnesses, infos, fieldlines
+        return fitnesses, infos
 
-    def _evaluate_and_record(self, population: list[np.ndarray],
-                             gen: int, is_initial: bool = False):
-        """Evaluate + save HDF5 + populate self.fitnesses."""
-        fitnesses, infos, fieldlines = self._evaluate_batch(population, gen)
-        for fit, info, fd in zip(fitnesses, infos, fieldlines):
+    def _evaluate_and_record(self, population: list[np.ndarray], gen: int):
+        """Evaluate a population and record fitnesses + metadata."""
+        fitnesses, infos = self._evaluate_batch(population, gen)
+        for fit, info in zip(fitnesses, infos):
             self.fitnesses.append(float(fit))
             self.all_infos.append(info)
-            save_hdf5(info, fd, self.cfg.output_dir, self.cfg.device_name)
-
-    # ---- checkpoint restore ------------------------------------------------
-
-    def _try_restore(self) -> tuple[int, bool]:
-        """Try to restore from checkpoint; return (start_gen, restored_flag)."""
-        state = self.checkpointer.load()
-        if state is None:
-            return 0, False
-
-        gen = state["gen"]
-        self.pop = [np.asarray(ind, dtype=np.float64) for ind in state["pop"]]
-        self.fitnesses = [float(f) for f in state["fitnesses"]]
-        self.invalid_count = [int(c) for c in state["invalid_count"]]
-
-        # Restore random state
-        rng_state = state["rng_state"]
-        if len(rng_state) > 0:
-            try:
-                np.random.set_state(rng_state.tolist())
-            except (ValueError, TypeError):
-                logger.warning("Could not restore numpy RNG state; using current state.")
-
-        return gen + 1, True
-
-    def _rng_state(self):
-        try:
-            return np.array(list(np.random.get_state()[1]), dtype=np.uint32)
-        except Exception:
-            return np.array([], dtype=np.uint32)
 
     # ---- convergence -------------------------------------------------------
 

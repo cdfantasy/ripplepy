@@ -8,7 +8,7 @@ neoclassical transport (ε_eff^(3/2)).
 
 With 5 coils total the physical degree of freedom is 4 (n-1), so the
 first coil (coil 0, nominal 50000 A) is held fixed and coils 1-4 are
-varied.  Simply run it — checkpoint/restart is automatic.
+varied.  Simply run it.
 """
 
 from __future__ import annotations
@@ -103,10 +103,8 @@ def main():
         device_name="H1",
         log_file=OUTPUT_DIR / "h1_optimisation.log",
         log_level=logging.INFO,
-        checkpoint_interval=10,
         ftol=1e-8,
         patience=15,
-        restart_best=None,
         seed=42,
     )
 

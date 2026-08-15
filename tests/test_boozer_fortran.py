@@ -141,10 +141,8 @@ def main():
     ctx.setup_grids(); ctx.run_all()
     py_eps = ctx.epstot_profile()
 
-    k_diag = np.argmin(np.abs(np.asarray(SURF_IDX_LIST) - 0.5))
-
     print(f"\n[3] Boozer → Fortran (effective_ripple_pyneo) …")
-    eps_bf = []; debug_fld = None; debug_geo = None
+    eps_bf = []
     xm_all = booz_dict["ixm_b"].astype(np.int32)
     xn_all = booz_dict["ixn_b"].astype(np.int32)
     m00 = np.where((xm_all == 0) & (xn_all == 0))[0][0]
@@ -167,18 +165,14 @@ def main():
         R0 = rt0_pyneo
         eps = Effective_Ripple.effective_ripple_pyneo(fld, geocur, R0)
         eps_bf.append(eps)
-        if k_surf == k_diag:
-            debug_fld = fld; debug_geo = geocur
 
     if COMPARE_PYTHON:
         print(f"\n[4] Boozer → Python η-state-machine (npart={NPART}) …")
-        eps_bp = []; debug_r = None
+        eps_bp = []
         for k_surf in range(len(SURF_IDX_LIST)):
             r = eps_eff_pyneo_ode_fast(booz_dict, k_surf, nturn=NTURN, npart=NPART,
                                        nstep_per=NSTEP_PER, rt0_ref=rt0_pyneo)
             eps_bp.append(r["eps_eff_32"])
-            if k_surf == k_diag:
-                debug_r = r
 
         # (debug diagnostic block removed — past debugging phase)
 

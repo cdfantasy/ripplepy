@@ -103,7 +103,7 @@ mgrid.expand_to_full_torus(nfp=2, full_torus=False)
 
 ### Optimisation
 
-`ripplepy.optimize` provides a Differential-Evolution optimiser for coil currents that minimises ε_eff^(3/2). The full evaluation chain — `set_extcur → find_axis → trace → compute_epstot → plasma params` — is wrapped in `StellaratorObjective`, with multiprocessing, HDF5/CSV output, and checkpoint/restart.
+`ripplepy.optimize` provides a Differential-Evolution optimiser for coil currents that minimises ε_eff^(3/2). The full evaluation chain — `set_extcur → find_axis → trace → compute_epstot → plasma params` — is wrapped in `StellaratorObjective`, with multiprocessing and CSV summary output. Field-line data is not persisted during the run; selected individuals can be re-evaluated afterwards (e.g. with the `save_hdf5` utility) for HDF5 output.
 
 ~~~python
 import numpy as np
