@@ -14,6 +14,7 @@ from __future__ import annotations
 import csv
 import logging
 import math
+import multiprocessing
 import os
 import random
 import sys
@@ -470,12 +471,52 @@ def save_csv(individual_infos: list[dict], filename: Path):
 # Feasibility survey
 # ---------------------------------------------------------------------------
 
+def _n_workers(processes: int | None) -> int:
+    """Resolve the worker count: explicit arg, else all available cores."""
+    return int(processes) if processes and processes > 0 else multiprocessing.cpu_count()
+
+
+_survey_cfg: OptimizationConfig | None = None
+
+
+def _survey_worker_init(config: OptimizationConfig):
+    """Initialise the survey worker (field once; needed for spawn platforms)."""
+    global _survey_cfg
+    _survey_cfg = config
+    global _mgrid_initialized
+    if not _mgrid_initialized:
+        with _silent():
+            from .ripple import initialize_mgrid_field as _init_mgrid
+            _init_mgrid(
+                str(config.mgrid_path),
+                nfp=config.nfp,
+                full_torus=config.full_torus,
+            )
+            _mgrid_initialized = True
+
+
+def _survey_point(point) -> bool:
+    """Feasibility of one coil-current vector: magnetic axis found => feasible."""
+    cfg = _survey_cfg
+    try:
+        with _silent():
+            set_extcur(np.asarray(point, dtype=np.float64))
+            axis_result = find_axis(
+                cfg.initial_rz, xtol=1e-4, max_iter=40,
+                delta_r=0.01, verbose=False,
+            )
+        return bool(axis_result[3])
+    except Exception:
+        return False
+
+
 def survey_feasibility(
     config: OptimizationConfig,
     n_samples: int = 256,
     seed: int = 0,
     expand_factor: float = 1.5,
     frac_max: float = 1.0,
+    processes: int | None = None,
 ) -> dict:
     """Coarse sweep of the current search box to map feasible regions.
 
@@ -486,6 +527,9 @@ def survey_feasibility(
     feasibility, per-coil statistics, a suggested tighter bounding box, and an
     ADAPTED set of initial_bounds (see below); the raw survey is written to
     <output_dir>/survey_points.csv.
+
+    The per-point find_axis checks run IN PARALLEL over a process pool
+    (processes workers, or all available cores by default).
 
     Adaptive-bounds policy (feed adjusted_bounds back as initial_bounds):
       - feasible fraction >= 0.9  → the box is mostly valid, so WIDEN it by
@@ -515,16 +559,11 @@ def survey_feasibility(
     u = Sobol(d=n_dim, scramble=True, seed=seed).random(n_samples)
     points = lo + u * (hi - lo)
 
-    feasible = np.zeros(n_samples, dtype=bool)
-    for k in range(n_samples):
-        extcur = points[k].astype(np.float64)
-        with _silent():
-            set_extcur(extcur)
-            axis_result = find_axis(
-                config.initial_rz, xtol=1e-4, max_iter=40,
-                delta_r=0.01, verbose=False,
-            )
-        feasible[k] = bool(axis_result[3])   # axis found → configuration forms
+    # Parallel feasibility check: one task per point (axis found => feasible).
+    n_workers = _n_workers(processes)
+    with Pool(processes=n_workers, initializer=_survey_worker_init,
+              initargs=(config,)) as pool:
+        feasible = np.asarray(pool.map(_survey_point, points), dtype=bool)
 
     n_feasible = int(feasible.sum())
 
@@ -618,6 +657,7 @@ def explore_feasible_region(
     seed: int = 0,
     expand_factor: float = 1.5,
     frac_max: float = 1.0,
+    processes: int | None = None,
     max_rounds: int = 6,
 ) -> dict:
     """Adaptively explore the feasible-region extent with Sobol + find_axis.
@@ -629,6 +669,9 @@ def explore_feasible_region(
     automatically: what matters for the boundary estimate is the number of
     points landing INSIDE the feasible island (low-discrepancy coverage itself
     depends on the dimension, not on the box volume).
+
+    Each round's survey runs in parallel over a process pool
+    (processes workers, or all available cores by default).
 
     Returns:
       - extent_bounds : [nominal, fraction] box covering the explored feasible
@@ -648,6 +691,7 @@ def explore_feasible_region(
         nominal_vals = raw[:, 0]
         fracs = raw[:, 1].copy()
     n_dim = len(nominal_vals)
+    n_workers = _n_workers(processes)
 
     rounds: list[tuple[int, float]] = []
     n_cur = n_samples
@@ -662,6 +706,7 @@ def explore_feasible_region(
             initial_rz=config.initial_rz,
             initial_bounds=np.column_stack([nominal_vals, fracs]),
             delt_r=config.delt_r,
+            processes=n_workers,
             output_dir=config.output_dir,
         )
         res = survey_feasibility(sub, n_samples=n_cur, seed=seed + rnd)

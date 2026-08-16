@@ -42,7 +42,7 @@ BOUNDS_FRACTION = 0.2
 
 # Adaptive feasible-region exploration
 EXPLORE = True                # set False to skip and use BOUNDS_FRACTION directly
-SURVEY_N_SAMPLES = 128
+SURVEY_N_SAMPLES = 256
 EXPLORE_MAX_ROUNDS = 5
 EXPLORE_EXPAND = 1.5
 
