@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import csv
 import logging
+import math
 import os
 import random
 import sys
@@ -131,7 +132,16 @@ class OptimizationConfig:
     F : float
         Differential weight (mutation scaling).
     CR : float
-        Crossover probability.
+        Crossover probability (initial mu_CR for JADE).
+    strategy : str
+        DE strategy: "jade" (default; adaptive F/CR, current-to-pbest/1 with
+        external archive) or "rand1bin" (classic DE/rand/1/bin, fixed F and CR).
+    p_best : float
+        JADE: fraction of the population defining the "pbest" pool (0 < p <= 1).
+    adapt_rate : float
+        JADE: adaptation rate c for the mu_F / mu_CR updates (default 0.1).
+    archive_size : int
+        JADE: maximum external-archive size; 0 = auto (= n_pop).
     delt_r : float
         Radial offset from axis for starting field lines.
     processes : int
@@ -150,6 +160,9 @@ class OptimizationConfig:
         Logging level (e.g. logging.INFO, logging.DEBUG).
     ftol : float or None
         Early-stop tolerance on best-fitness change (disabled if None).
+    ftol_relative : bool
+        If True (default), `ftol` is interpreted as a RELATIVE change
+        (fraction of the current best fitness); if False, as an absolute change.
     patience : int
         Generations to wait after ftol triggers before stopping.
     """
@@ -165,6 +178,10 @@ class OptimizationConfig:
     max_gen: int = 100
     F: float = 0.5
     CR: float = 0.7
+    strategy: str = "jade"
+    p_best: float = 0.1
+    adapt_rate: float = 0.1
+    archive_size: int = 0
     delt_r: float = 0.05
     processes: int = 8
     output_dir: Path = field(default_factory=lambda: Path("."))
@@ -174,6 +191,7 @@ class OptimizationConfig:
     log_file: Optional[Path] = None
     log_level: int = logging.INFO
     ftol: Optional[float] = None
+    ftol_relative: bool = True
     patience: int = 10
 
     def __post_init__(self):
@@ -292,6 +310,7 @@ class StellaratorObjective:
             info["failure_message"] = "Magnetic axis not found"
             logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
             return self.INVALID_FITNESS, info
+        info["axis_rz"] = np.asarray(axis_rz, dtype=np.float64)
 
         # --- compute initial grad-psi ---
         RZ = np.array(
@@ -429,6 +448,124 @@ def save_csv(individual_infos: list[dict], filename: Path):
 
 
 # ---------------------------------------------------------------------------
+# Feasibility survey
+# ---------------------------------------------------------------------------
+
+def survey_feasibility(
+    config: OptimizationConfig,
+    n_samples: int = 256,
+    seed: int = 0,
+    nturn: int = 60,
+    nphi: int = 90,
+    npart: int = 200,
+) -> dict:
+    """Coarse sweep of the current search box to map infeasible regions.
+
+    Evaluates n_samples low-discrepancy (Sobol) points uniformly inside the
+    current absolute bounds at a CHEAP resolution, marking each point valid or
+    invalid (fitness < INVALID_FITNESS).  Returns overall validity, per-coil
+    statistics and a suggested tighter bounding box built from the valid points;
+    the raw survey is also written to <output_dir>/survey_points.csv.
+
+    Use the returned suggested_bounds (or the printed per-coil ranges) as
+    initial_bounds for the real optimisation run.
+    """
+    from scipy.stats.qmc import Sobol
+
+    # One-time field initialisation (same machinery as StellaratorObjective).
+    global _mgrid_initialized
+    if not _mgrid_initialized:
+        with _silent():
+            from .ripple import initialize_mgrid_field as _init_mgrid
+            _init_mgrid(
+                str(config.mgrid_path),
+                nfp=config.nfp,
+                full_torus=config.full_torus,
+            )
+            _mgrid_initialized = True
+
+    lo = config._abs_bounds[:, 0]
+    hi = config._abs_bounds[:, 1]
+    n_dim = len(lo)
+    invalid = StellaratorObjective.INVALID_FITNESS
+
+    u = Sobol(d=n_dim, scramble=True, seed=seed).random(n_samples)
+    points = lo + u * (hi - lo)
+
+    fitnesses = np.full(n_samples, invalid, dtype=np.float64)
+    for k in range(n_samples):
+        extcur = points[k].astype(np.float64)
+        with _silent():
+            set_extcur(extcur)
+            axis_result = find_axis(
+                config.initial_rz, xtol=1e-4, max_iter=40,
+                delta_r=0.01, verbose=False,
+            )
+        axis_rz, _, _, ok = axis_result
+        if not ok:
+            continue
+        start_rz = np.array([axis_rz[0] + config.delt_r, axis_rz[1]],
+                            dtype=np.float64)
+        with _silent():
+            # find_axis resets the trace parameters internally - restore cheap res.
+            set_trace_parameters(nturn, nphi, npart=npart, verbose=False)
+            epstot = compute_epstot(
+                start_rz, initial_gradpsi=None,
+                return_fieldline=False, verbose=False,
+            )
+        eps = epstot[0]
+        if eps is None or np.isnan(eps) or eps >= invalid:
+            continue
+        fitnesses[k] = float(eps)
+
+    valid = fitnesses < invalid
+    n_valid = int(valid.sum())
+
+    # Suggested tighter bounds: [2nd, 98th] percentile of the valid points,
+    # clamped to the original box (percentiles guard against overfitting to
+    # single outliers of the coarse sweep).
+    suggested = np.empty_like(config._abs_bounds)
+    for d in range(n_dim):
+        vals = points[valid, d]
+        if n_valid == 0:
+            suggested[d] = config._abs_bounds[d]
+        elif n_valid == 1:
+            suggested[d, 0] = suggested[d, 1] = float(vals[0])
+        else:
+            q = np.percentile(vals, [2.0, 98.0])
+            suggested[d, 0] = max(lo[d], float(q[0]))
+            suggested[d, 1] = min(hi[d], float(q[1]))
+
+    out_dir = Path(config.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = out_dir / "survey_points.csv"
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([f"coil_{d}" for d in range(n_dim)]
+                        + ["fitness", "valid"])
+        for k in range(n_samples):
+            writer.writerow(list(points[k]) + [fitnesses[k], int(valid[k])])
+
+    print(f"\n=== Feasibility survey ({n_samples} Sobol points, cheap res "
+          f"nturn={nturn}, nphi={nphi}, npart={npart}) ===")
+    print(f"  valid: {n_valid}/{n_samples} ({n_valid / n_samples * 100:.1f}%)")
+    for d in range(n_dim):
+        print(f"  coil {d}: original [{lo[d]:10.1f}, {hi[d]:10.1f}]  "
+              f"-> suggested [{suggested[d, 0]:10.1f}, {suggested[d, 1]:10.1f}]")
+    print(f"  survey CSV -> {csv_path}")
+    if n_valid / n_samples < 0.5:
+        print("  WARNING: less than half the box is feasible - narrow the "
+              "bounds or move the search box before optimising.")
+
+    return {
+        "valid_fraction": float(n_valid / n_samples),
+        "n_valid": n_valid,
+        "n_samples": n_samples,
+        "suggested_bounds": suggested,
+    }
+
+
+# ---------------------------------------------------------------------------
 # DE core
 # ---------------------------------------------------------------------------
 
@@ -450,6 +587,14 @@ class DifferentialEvolution:
         # History
         self.all_infos: list[dict] = []
 
+        # Elitism: archive of the best-known solution (never lost by re-init).
+        self._best_ever_ind: np.ndarray | None = None
+        self._best_ever_fit: float = float("inf")
+
+        # Per-individual magnetic axis of the last successful evaluation,
+        # used to warm-start find_axis for the next generation.
+        self._axes: list[np.ndarray | None] = []
+
         # Convergence tracking
         self._best_fitness_history: list[float] = []
         self._patience_counter = 0
@@ -461,6 +606,13 @@ class DifferentialEvolution:
         if config.seed is not None:
             random.seed(config.seed)
             np.random.seed(config.seed)
+
+        # JADE adaptive parameters (initialised from F / CR) + external archive
+        self.mu_F: float = float(config.F)
+        self.mu_CR: float = float(config.CR)
+        self.archive: list[np.ndarray] = []
+        self._archive_max: int = (config.archive_size if config.archive_size > 0
+                                  else config.n_pop)
 
     # ---- public entry point ------------------------------------------------
 
@@ -501,26 +653,40 @@ class DifferentialEvolution:
                 start_fit)
         else:
             logger.info("Nominal baseline ε = %.6e", start_fit)
+            self._best_ever_fit = start_fit
+            self._best_ever_ind = nominal_extcur.copy()
 
         self._init_population()
         self._evaluate_and_record(self.pop, gen=0)
+
+        # Seed the elitism archive with the best of the initial population.
+        gen0_best = int(np.argmin(self.fitnesses))
+        if self.fitnesses[gen0_best] < self._best_ever_fit:
+            self._best_ever_fit = self.fitnesses[gen0_best]
+            self._best_ever_ind = self.pop[gen0_best].copy()
 
         # ---- main loop ----
         for gen in range(1, self.cfg.max_gen + 1):
             t0 = time.perf_counter()
 
-            # 1. Generate trial vectors
-            trials = []
-            for i in range(self.cfg.n_pop):
-                mutant = self._mutate(self.pop[i], self.pop)
-                trial = self._crossover(self.pop[i], mutant)
-                trials.append(trial)
+            # 1. Generate trial vectors (JADE: adaptive F/CR + pbest mutation)
+            F_vals = None
+            CR_vals = None
+            if self.cfg.strategy == "jade":
+                trials, F_vals, CR_vals = self._generate_trials_jade(self.pop)
+            else:
+                trials = []
+                for i in range(self.cfg.n_pop):
+                    mutant = self._mutate(self.pop[i], self.pop)
+                    trials.append(self._crossover(self.pop[i], mutant))
 
             # 2. Evaluate
             trial_fitnesses, trial_infos = self._evaluate_batch(trials, gen)
 
-            # 3. Selection
+            # 3. Selection (elitism: the current best is never re-initialised)
             invalid_solutions = 0
+            accepted: list[int] = []
+            best_idx = int(np.argmin(self.fitnesses))
             for i in range(self.cfg.n_pop):
                 tf = trial_fitnesses[i]
                 cf = self.fitnesses[i]
@@ -530,38 +696,60 @@ class DifferentialEvolution:
                 else:
                     self.invalid_count[i] = 0
 
-                if self.invalid_count[i] >= 3:
-                    # Re-initialise this individual
+                if self.invalid_count[i] >= 3 and i != best_idx:
+                    # Re-initialise this individual (never the current best —
+                    # its trials failing says nothing about its own quality).
                     new_ind = self._init_individual()
                     new_fit, new_info = self.objective.evaluate(new_ind, gen, i)
                     self.pop[i] = new_ind
                     self.fitnesses[i] = new_fit
                     self.all_infos.append(new_info)
+                    self._axes[i] = new_info.get("axis_rz")
                     self.invalid_count[i] = 0
                     logger.info(
                         "Gen %d, Ind %d: re-initialised (fitness=%.6e)",
                         gen, i, new_fit,
                     )
+                elif self.invalid_count[i] >= 3:
+                    # Protected best: keep it, reset its failure counter.
+                    self.invalid_count[i] = 0
                 elif tf < StellaratorObjective.INVALID_FITNESS and tf <= cf:
+                    # Accepted: the discarded parent goes into the JADE archive.
+                    if self.cfg.strategy == "jade":
+                        self.archive.append(self.pop[i])
                     self.pop[i] = trials[i]
                     self.fitnesses[i] = tf
                     self.all_infos.append(trial_infos[i])
+                    self._axes[i] = trial_infos[i].get("axis_rz")
+                    accepted.append(i)
 
                 if tf >= StellaratorObjective.INVALID_FITNESS:
                     invalid_solutions += 1
 
-            # 4. Log generation summary
+            # JADE: adapt mu_F / mu_CR from the successful trials.
+            if self.cfg.strategy == "jade":
+                self._update_jade(F_vals, CR_vals, accepted)
+
+            # 4. Update best / elitism archive / axis warm-start, then log
             t_elapsed = time.perf_counter() - t0
             best_idx = int(np.argmin(self.fitnesses))
             best_fit = self.fitnesses[best_idx]
-            self._best_fitness_history.append(best_fit)
+            if best_fit < self._best_ever_fit:
+                self._best_ever_fit = best_fit
+                self._best_ever_ind = self.pop[best_idx].copy()
+            self._best_fitness_history.append(self._best_ever_fit)
+
+            # Warm-start the magnetic-axis search for the next generation.
+            axis_guess = self._axes[best_idx]
+            if axis_guess is not None:
+                self.cfg.initial_rz = axis_guess
 
             pct_invalid = invalid_solutions / self.cfg.n_pop * 100
             best_extcur = self.pop[best_idx]
             logger.info(
-                "Gen %3d/%d  |  best ε=%.6e  |  invalid=%3d/%d (%.1f%%)  |  "
-                "time=%6.2fs  |  extcur=%s",
-                gen, self.cfg.max_gen, best_fit,
+                "Gen %3d/%d  |  best ε=%.6e  |  best-ever ε=%.6e  |  "
+                "invalid=%3d/%d (%.1f%%)  |  time=%6.2fs  |  extcur=%s",
+                gen, self.cfg.max_gen, best_fit, self._best_ever_fit,
                 invalid_solutions, self.cfg.n_pop, pct_invalid,
                 t_elapsed,
                 np.array2string(best_extcur, separator=', ',
@@ -577,16 +765,25 @@ class DifferentialEvolution:
                 break
 
         # ---- finalise ----
-        best_idx = int(np.argmin(self.fitnesses))
-        best_ind = self.pop[best_idx]
-        best_fitness = self.fitnesses[best_idx]
+        if self._best_ever_ind is not None:
+            best_ind = self._best_ever_ind
+            best_fitness = self._best_ever_fit
+            logger.info(
+                "Optimisation finished. Best (historical) fitness = %.6e "
+                "— archived, immune to re-initialisation.",
+                best_fitness,
+            )
+        else:
+            # No valid solution was ever found; fall back to current argmin.
+            best_idx = int(np.argmin(self.fitnesses))
+            best_ind = self.pop[best_idx]
+            best_fitness = self.fitnesses[best_idx]
+            logger.info(
+                "Optimisation finished. Best fitness = %.6e at index %d",
+                best_fitness, best_idx,
+            )
 
         save_csv(self.all_infos, self.cfg.output_dir / self.cfg.csv_filename)
-
-        logger.info(
-            "Optimisation finished. Best fitness = %.6e at index %d",
-            best_fitness, best_idx,
-        )
         return best_ind, best_fitness, self.all_infos
 
     # ---- population init ---------------------------------------------------
@@ -602,6 +799,7 @@ class DifferentialEvolution:
         self.pop = [self._init_individual() for _ in range(self.cfg.n_pop)]
         self.fitnesses = []
         self.invalid_count = [0] * self.cfg.n_pop
+        self._axes = [None] * self.cfg.n_pop
 
     # ---- DE operators ------------------------------------------------------
 
@@ -620,15 +818,88 @@ class DifferentialEvolution:
             mutant[i] = max(lo, min(hi, mutant[i]))
         return mutant
 
-    def _crossover(self, individual: np.ndarray, mutant: np.ndarray) -> np.ndarray:
-        """Binomial crossover."""
+    def _crossover(self, individual: np.ndarray, mutant: np.ndarray,
+                   CR: float | None = None) -> np.ndarray:
+        """Binomial crossover (per-trial CR for JADE, cfg.CR otherwise)."""
+        cr = self.cfg.CR if CR is None else CR
         size = len(individual)
         trial = individual.copy()
         j_rand = random.randint(0, size - 1)
         for i in range(size):
-            if random.random() < self.cfg.CR or i == j_rand:
+            if random.random() < cr or i == j_rand:
                 trial[i] = mutant[i]
         return trial
+
+    # ---- JADE: adaptive DE/current-to-pbest/1 ------------------------------
+
+    def _sample_F(self) -> float:
+        """Sample F from a Cauchy distribution around mu_F (ensure F > 0)."""
+        while True:
+            F = self.mu_F + 0.1 * math.tan(math.pi * (random.random() - 0.5))
+            if F > 0.0:
+                return F
+
+    def _sample_CR(self) -> float:
+        """Sample CR from a Normal distribution around mu_CR, clamped to [0, 1]."""
+        return min(1.0, max(0.0, random.gauss(self.mu_CR, 0.1)))
+
+    def _pick_jade_partners(self, i: int, n_pop: int, n_pool: int
+                            ) -> tuple[int, int]:
+        """Distinct partner indices for JADE (r1 in pop, r2 in pop ∪ archive)."""
+        r1 = random.randrange(n_pop - 1)
+        if r1 >= i:
+            r1 += 1
+        while True:
+            r2 = random.randrange(n_pool)
+            if r2 < n_pop and (r2 == i or r2 == r1):
+                continue
+            break
+        return r1, r2
+
+    def _generate_trials_jade(self, population: list[np.ndarray]
+                              ) -> tuple[list[np.ndarray], np.ndarray, np.ndarray]:
+        """Generate trials with DE/current-to-pbest/1 + per-individual F, CR."""
+        n = len(population)
+        order = np.argsort(self.fitnesses)
+        n_pbest = max(1, int(round(self.cfg.p_best * n)))
+        pbest_pool = order[:n_pbest].tolist()
+        pool = population + self.archive
+        n_pool = len(pool)
+
+        trials: list[np.ndarray] = []
+        F_vals = np.empty(n, dtype=np.float64)
+        CR_vals = np.empty(n, dtype=np.float64)
+        for i in range(n):
+            F = self._sample_F()
+            CR = self._sample_CR()
+            F_vals[i], CR_vals[i] = F, CR
+            x_i = population[i]
+            x_pbest = population[random.choice(pbest_pool)]
+            r1, r2 = self._pick_jade_partners(i, n, n_pool)
+            mutant = np.empty_like(x_i)
+            for d in range(len(x_i)):
+                mutant[d] = (x_i[d]
+                             + F * (x_pbest[d] - x_i[d])
+                             + F * (population[r1][d] - pool[r2][d]))
+                lo, hi = self.cfg._abs_bounds[d]
+                mutant[d] = max(lo, min(hi, mutant[d]))
+            trials.append(self._crossover(x_i, mutant, CR))
+        return trials, F_vals, CR_vals
+
+    def _update_jade(self, F_vals, CR_vals, accepted: list[int]):
+        """Adapt mu_F / mu_CR from successful trials; trim the archive."""
+        if not accepted:
+            return
+        S_F = F_vals[accepted]
+        S_CR = CR_vals[accepted]
+        sum_F = float(S_F.sum())
+        if sum_F > 0.0:
+            self.mu_F = ((1.0 - self.cfg.adapt_rate) * self.mu_F
+                         + self.cfg.adapt_rate * float(S_F @ S_F) / sum_F)
+        self.mu_CR = ((1.0 - self.cfg.adapt_rate) * self.mu_CR
+                      + self.cfg.adapt_rate * float(S_CR.mean()))
+        while len(self.archive) > self._archive_max:
+            self.archive.pop(random.randrange(len(self.archive)))
 
     # ---- evaluation --------------------------------------------------------
 
@@ -648,9 +919,10 @@ class DifferentialEvolution:
     def _evaluate_and_record(self, population: list[np.ndarray], gen: int):
         """Evaluate a population and record fitnesses + metadata."""
         fitnesses, infos = self._evaluate_batch(population, gen)
-        for fit, info in zip(fitnesses, infos):
+        for k, (fit, info) in enumerate(zip(fitnesses, infos)):
             self.fitnesses.append(float(fit))
             self.all_infos.append(info)
+            self._axes[k] = info.get("axis_rz")
 
     # ---- convergence -------------------------------------------------------
 
@@ -659,10 +931,15 @@ class DifferentialEvolution:
         if self.cfg.ftol is None or len(self._best_fitness_history) < 2:
             return False
 
-        # Check if best fitness has stabilised
+        # Check if best fitness has stabilised (relative or absolute tolerance)
         window = min(self.cfg.patience, len(self._best_fitness_history))
         recent = self._best_fitness_history[-window:]
-        improvement = abs(recent[-1] - recent[0])
+        delta = abs(recent[-1] - recent[0])
+        if self.cfg.ftol_relative:
+            scale = max(abs(recent[-1]), abs(recent[0]), 1e-30)
+            improvement = delta / scale
+        else:
+            improvement = delta
         if improvement < self.cfg.ftol:
             self._patience_counter += 1
         else:
