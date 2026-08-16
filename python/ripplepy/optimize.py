@@ -144,6 +144,10 @@ class OptimizationConfig:
         JADE: maximum external-archive size; 0 = auto (= n_pop).
     delt_r : float
         Radial offset from axis for starting field lines.
+    bounds_fraction : float
+        Fraction used to build automatic absolute bounds when initial_bounds
+        is given as a plain 1-D array of nominal coil currents (default 0.2,
+        i.e. ±20% around each initial current).
     processes : int
         Number of parallel worker processes.
     output_dir : str or Path
@@ -183,6 +187,7 @@ class OptimizationConfig:
     adapt_rate: float = 0.1
     archive_size: int = 0
     delt_r: float = 0.05
+    bounds_fraction: float = 0.2
     processes: int = 8
     output_dir: Path = field(default_factory=lambda: Path("."))
     csv_filename: str = "Individual_info_list.csv"
@@ -203,22 +208,36 @@ class OptimizationConfig:
             if val is not None:
                 setattr(self, arr_name, np.asarray(val, dtype=np.float64))
 
-        # ── Convert relative bounds [nominal, fraction] → absolute [lo, hi] ─
+        # ── Convert bounds → absolute [lo, hi] ─────────────────────────────
+        #   initial_bounds may be:
+        #     (n_coils, 2)  → [nominal, fraction] per coil
+        #     (n_coils,)    → plain nominal currents; auto-bounds ±bounds_fraction
         #   fraction = 0  → locked at nominal (lo == hi)
-        #   fraction > 0  → [nominal×(1-fraction), nominal×(1+fraction)]
-        #   nominal  = 0  → warning, set to 1.0
-        raw = self.initial_bounds
+        #   fraction > 0  → [nominal−|nominal|·fraction, nominal+|nominal|·fraction]
+        #   (symmetric around nominal — also correct for NEGATIVE nominal currents)
+        raw = np.asarray(self.initial_bounds, dtype=np.float64)
+        auto = raw.ndim == 1
+        if auto:
+            raw = np.column_stack([raw, np.full(len(raw), self.bounds_fraction)])
+        elif raw.ndim != 2 or raw.shape[1] != 2:
+            raise ValueError(
+                "initial_bounds must be shape (n_coils, 2) as [nominal, fraction] "
+                "or a 1-D array of nominal coil currents (auto-bounds).")
         n_coils = len(raw)
         abs_bounds = np.empty((n_coils, 2), dtype=np.float64)
         for i in range(n_coils):
             nominal, frac = float(raw[i, 0]), float(raw[i, 1])
             if nominal == 0.0:
-                logger.warning(
-                    "Coil %d has nominal=0; setting to 1.0 for fraction-based "
-                    "bounds.  Consider using a non‑zero nominal value.", i)
-                nominal = 1.0
-            abs_bounds[i, 0] = nominal * (1.0 - frac)
-            abs_bounds[i, 1] = nominal * (1.0 + frac)
+                if auto:
+                    frac = 0.0      # a coil initially off stays locked at 0
+                else:
+                    logger.warning(
+                        "Coil %d has nominal=0; setting to 1.0 for fraction-based "
+                        "bounds.  Consider using a non‑zero nominal value.", i)
+                    nominal = 1.0
+            d = abs(nominal) * frac
+            abs_bounds[i, 0] = nominal - d
+            abs_bounds[i, 1] = nominal + d
         self._abs_bounds = abs_bounds
 
         n_fixed = int(np.sum(abs_bounds[:, 0] == abs_bounds[:, 1]))
@@ -455,20 +474,25 @@ def survey_feasibility(
     config: OptimizationConfig,
     n_samples: int = 256,
     seed: int = 0,
-    nturn: int = 60,
-    nphi: int = 90,
-    npart: int = 200,
+    expand_factor: float = 1.5,
+    frac_max: float = 1.0,
 ) -> dict:
-    """Coarse sweep of the current search box to map infeasible regions.
+    """Coarse sweep of the current search box to map feasible regions.
 
-    Evaluates n_samples low-discrepancy (Sobol) points uniformly inside the
-    current absolute bounds at a CHEAP resolution, marking each point valid or
-    invalid (fitness < INVALID_FITNESS).  Returns overall validity, per-coil
-    statistics and a suggested tighter bounding box built from the valid points;
-    the raw survey is also written to <output_dir>/survey_points.csv.
+    A point is marked FEASIBLE if a magnetic axis can be found for its coil
+    currents — finding the axis means the field closes and a configuration can
+    form, so the expensive epsilon_eff evaluation is intentionally skipped
+    (which makes the sweep an order of magnitude cheaper).  Returns overall
+    feasibility, per-coil statistics, a suggested tighter bounding box, and an
+    ADAPTED set of initial_bounds (see below); the raw survey is written to
+    <output_dir>/survey_points.csv.
 
-    Use the returned suggested_bounds (or the printed per-coil ranges) as
-    initial_bounds for the real optimisation run.
+    Adaptive-bounds policy (feed adjusted_bounds back as initial_bounds):
+      - feasible fraction >= 0.9  → the box is mostly valid, so WIDEN it by
+        expand_factor (a bigger search envelope = more population diversity);
+      - feasible fraction <= 0.5  → the box is mostly dead, so SHRINK onto the
+        feasible island (2nd-98th percentile of the feasible points);
+      - otherwise                 → keep the current fractions.
     """
     from scipy.stats.qmc import Sobol
 
@@ -487,12 +511,11 @@ def survey_feasibility(
     lo = config._abs_bounds[:, 0]
     hi = config._abs_bounds[:, 1]
     n_dim = len(lo)
-    invalid = StellaratorObjective.INVALID_FITNESS
 
     u = Sobol(d=n_dim, scramble=True, seed=seed).random(n_samples)
     points = lo + u * (hi - lo)
 
-    fitnesses = np.full(n_samples, invalid, dtype=np.float64)
+    feasible = np.zeros(n_samples, dtype=bool)
     for k in range(n_samples):
         extcur = points[k].astype(np.float64)
         with _silent():
@@ -501,35 +524,19 @@ def survey_feasibility(
                 config.initial_rz, xtol=1e-4, max_iter=40,
                 delta_r=0.01, verbose=False,
             )
-        axis_rz, _, _, ok = axis_result
-        if not ok:
-            continue
-        start_rz = np.array([axis_rz[0] + config.delt_r, axis_rz[1]],
-                            dtype=np.float64)
-        with _silent():
-            # find_axis resets the trace parameters internally - restore cheap res.
-            set_trace_parameters(nturn, nphi, npart=npart, verbose=False)
-            epstot = compute_epstot(
-                start_rz, initial_gradpsi=None,
-                return_fieldline=False, verbose=False,
-            )
-        eps = epstot[0]
-        if eps is None or np.isnan(eps) or eps >= invalid:
-            continue
-        fitnesses[k] = float(eps)
+        feasible[k] = bool(axis_result[3])   # axis found → configuration forms
 
-    valid = fitnesses < invalid
-    n_valid = int(valid.sum())
+    n_feasible = int(feasible.sum())
 
-    # Suggested tighter bounds: [2nd, 98th] percentile of the valid points,
+    # Suggested tighter bounds: [2nd, 98th] percentile of the feasible points,
     # clamped to the original box (percentiles guard against overfitting to
     # single outliers of the coarse sweep).
     suggested = np.empty_like(config._abs_bounds)
     for d in range(n_dim):
-        vals = points[valid, d]
-        if n_valid == 0:
+        vals = points[feasible, d]
+        if n_feasible == 0:
             suggested[d] = config._abs_bounds[d]
-        elif n_valid == 1:
+        elif n_feasible == 1:
             suggested[d, 0] = suggested[d, 1] = float(vals[0])
         else:
             q = np.percentile(vals, [2.0, 98.0])
@@ -541,27 +548,167 @@ def survey_feasibility(
     csv_path = out_dir / "survey_points.csv"
     with open(csv_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([f"coil_{d}" for d in range(n_dim)]
-                        + ["fitness", "valid"])
+        writer.writerow([f"coil_{d}" for d in range(n_dim)] + ["feasible"])
         for k in range(n_samples):
-            writer.writerow(list(points[k]) + [fitnesses[k], int(valid[k])])
+            writer.writerow(list(points[k]) + [int(feasible[k])])
 
-    print(f"\n=== Feasibility survey ({n_samples} Sobol points, cheap res "
-          f"nturn={nturn}, nphi={nphi}, npart={npart}) ===")
-    print(f"  valid: {n_valid}/{n_samples} ({n_valid / n_samples * 100:.1f}%)")
+    feasible_rate = n_feasible / n_samples
+
+    # ── Adaptive bounds: feed back as new initial_bounds ──────────────────
+    raw = np.asarray(config.initial_bounds, dtype=np.float64)
+    if raw.ndim == 1:
+        nominal_vals = raw
+        old_fracs = np.full(n_dim, config.bounds_fraction)
+    else:
+        nominal_vals = raw[:, 0]
+        old_fracs = raw[:, 1]
+    new_fracs = old_fracs.copy()
+    if feasible_rate >= 0.9:
+        # Mostly feasible → widen the box to increase population diversity.
+        new_fracs = np.minimum(frac_max, old_fracs * expand_factor)
+        action = f"EXPAND x{expand_factor}"
+    elif feasible_rate <= 0.5:
+        # Mostly infeasible → shrink onto the feasible island.
+        for d in range(n_dim):
+            if abs(nominal_vals[d]) < 1e-12:
+                continue
+            vals = points[feasible, d]
+            if n_feasible == 0:
+                continue
+            elif n_feasible == 1:
+                new_fracs[d] = 0.01
+            else:
+                q = np.percentile(vals, [2.0, 98.0])
+                need = (max(abs(q[1] - nominal_vals[d]),
+                            abs(nominal_vals[d] - q[0]))
+                        / max(abs(nominal_vals[d]), 1e-12))
+                new_fracs[d] = min(frac_max, need * 1.05)
+        action = "SHRINK to feasible island"
+    else:
+        action = "KEEP current fractions"
+    adjusted_bounds = np.column_stack([nominal_vals, new_fracs])
+
+    print(f"\n=== Feasibility survey ({n_samples} Sobol points) ===")
+    print(f"  feasible (axis found): {n_feasible}/{n_samples} "
+          f"({feasible_rate * 100:.1f}%)")
     for d in range(n_dim):
         print(f"  coil {d}: original [{lo[d]:10.1f}, {hi[d]:10.1f}]  "
               f"-> suggested [{suggested[d, 0]:10.1f}, {suggested[d, 1]:10.1f}]")
     print(f"  survey CSV -> {csv_path}")
-    if n_valid / n_samples < 0.5:
+    if feasible_rate < 0.5:
         print("  WARNING: less than half the box is feasible - narrow the "
               "bounds or move the search box before optimising.")
+    print(f"  adaptive bounds: {action}")
+    for d in range(n_dim):
+        print(f"    coil {d}: fraction {old_fracs[d]:.3f} -> {new_fracs[d]:.3f}  "
+              f"({nominal_vals[d]:10.1f} +/- {abs(nominal_vals[d]) * new_fracs[d]:10.1f})")
 
     return {
-        "valid_fraction": float(n_valid / n_samples),
-        "n_valid": n_valid,
+        "feasible_fraction": float(feasible_rate),
+        "n_feasible": n_feasible,
         "n_samples": n_samples,
         "suggested_bounds": suggested,
+        "adjusted_bounds": adjusted_bounds,
+    }
+
+
+def explore_feasible_region(
+    config: OptimizationConfig,
+    n_samples: int = 128,
+    seed: int = 0,
+    expand_factor: float = 1.5,
+    frac_max: float = 1.0,
+    max_rounds: int = 6,
+) -> dict:
+    """Adaptively explore the feasible-region extent with Sobol + find_axis.
+
+    Surveys the search box, widens it while it stays almost fully feasible
+    (>= 90%), and falls back to the last fully-feasible box once feasibility
+    drops — bracketing the boundary of the valid (axis-forming) region.  When
+    the feasible fraction becomes small, the per-round sample count is doubled
+    automatically: what matters for the boundary estimate is the number of
+    points landing INSIDE the feasible island (low-discrepancy coverage itself
+    depends on the dimension, not on the box volume).
+
+    Returns:
+      - extent_bounds : [nominal, fraction] box covering the explored feasible
+                        region — feed back as initial_bounds for the real run.
+      - core_bounds   : [nominal, fraction] inner box (2nd-98th percentile of
+                        the feasible points) where results should be reliable.
+      - rounds        : list of (round, feasible_fraction).
+
+    Edge regions of extent_bounds may give poorer epsilon_eff; that is expected
+    — the optimiser (JADE) will simply prefer the better interior solutions.
+    """
+    raw = np.asarray(config.initial_bounds, dtype=np.float64)
+    if raw.ndim == 1:
+        nominal_vals = raw
+        fracs = np.full(len(raw), config.bounds_fraction)
+    else:
+        nominal_vals = raw[:, 0]
+        fracs = raw[:, 1].copy()
+    n_dim = len(nominal_vals)
+
+    rounds: list[tuple[int, float]] = []
+    n_cur = n_samples
+    core_abs = None
+    prev_fracs = fracs.copy()
+    doubled = False
+    for rnd in range(max_rounds):
+        sub = OptimizationConfig(
+            mgrid_path=config.mgrid_path,
+            nfp=config.nfp,
+            full_torus=config.full_torus,
+            initial_rz=config.initial_rz,
+            initial_bounds=np.column_stack([nominal_vals, fracs]),
+            delt_r=config.delt_r,
+            output_dir=config.output_dir,
+        )
+        res = survey_feasibility(sub, n_samples=n_cur, seed=seed + rnd)
+        rate = float(res["feasible_fraction"])
+        # core = feasible-island of the last fully-feasible (>= 90%) round,
+        # so that core_bounds always lies INSIDE extent_bounds.
+        if rate >= 0.9 or core_abs is None:
+            core_abs = res["suggested_bounds"]
+        rounds.append((rnd + 1, rate))
+        print(f"    round {rnd + 1}: feasible = {rate * 100:.1f}%  "
+              f"fracs = {np.round(fracs, 3).tolist()}  (n={n_cur})")
+
+        if rate >= 0.9:
+            prev_fracs = fracs.copy()
+            fracs = np.minimum(frac_max, fracs * expand_factor)
+            if np.allclose(fracs, prev_fracs):
+                break          # already at frac_max - cannot widen further
+        elif rate < 0.3 and not doubled and n_cur < 1024:
+            # Feasible island is small: sharpen the boundary with more points.
+            n_cur *= 2
+            doubled = True
+            print(f"    -> doubling points to {n_cur} for a sharper boundary")
+            continue
+        else:
+            fracs = prev_fracs  # boundary bracketed: fall back to last good box
+            break
+
+    extent_bounds = np.column_stack([nominal_vals, fracs])
+
+    # Inner "core" box: fraction needed to cover the [q2, q98] feasible extent.
+    core_fracs = np.zeros(n_dim)
+    for d in range(n_dim):
+        if abs(nominal_vals[d]) < 1e-12:
+            continue
+        need = (max(abs(core_abs[d, 1] - nominal_vals[d]),
+                    abs(nominal_vals[d] - core_abs[d, 0]))
+                / abs(nominal_vals[d]))
+        core_fracs[d] = min(frac_max, max(need, 1e-3))
+    core_bounds = np.column_stack([nominal_vals, core_fracs])
+
+    print(f"  explored extent: {np.round(extent_bounds[:, 1], 3).tolist()}  "
+          f"(nominal {nominal_vals.tolist()})")
+    print(f"  core (inner)   : {np.round(core_bounds[:, 1], 3).tolist()}")
+    return {
+        "extent_bounds": extent_bounds,
+        "core_bounds": core_bounds,
+        "rounds": rounds,
     }
 
 
