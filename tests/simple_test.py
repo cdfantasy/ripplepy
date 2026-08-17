@@ -33,14 +33,14 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-EXTCUR = [72500.0, 2750.0, 1933.1, -90204.5, -51584.8]
+EXTCUR = [43861.6, 2750.0, 1650.0, -115866.9, -58000.0]
 INITIAL_RZ = (1.26, 0.0)
 DELTA_R = 0.05           # radial offset of the traced surface from the axis
 NTURN = 200
 NPHI = 360
 NPART = 5000
 PLOT = True              # set False on a headless machine (needs plotly)
-AXIS_Z_TOL = 0.02        # |Z_axis| tolerance (stellarator-symmetry check)
+AXIS_Z_TOL =1e-4        # |Z_axis| tolerance (stellarator-symmetry check)
 
 
 def main():
