@@ -367,7 +367,6 @@ class StellaratorObjective:
             "epsilon_eff": self.INVALID_FITNESS,
             "iota": np.nan,
             "volume": np.nan,
-            "major radius": np.nan,
             "average B": np.nan,
             "failure_flag": True,
             "failure_type": FailureType.UNKNOWN.value,
