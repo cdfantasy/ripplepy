@@ -94,6 +94,7 @@ def _setup_logging(log_file: Optional[Path] = None, level=logging.INFO):
 class FailureType(Enum):
     NONE = "none"
     AXIS_NOT_FOUND = "axis_not_found"
+    AXIS_OFF_SYMMETRY = "axis_off_symmetry"
     TRACING_FAILED = "tracing_failed"
     EPSILON_NAN = "epsilon_nan"
     UNKNOWN = "unknown"
@@ -170,6 +171,10 @@ class OptimizationConfig:
         (fraction of the current best fitness); if False, as an absolute change.
     patience : int
         Generations to wait after ftol triggers before stopping.
+    axis_z_tol : float
+        Maximum allowed |Z_axis| (m) under the stellarator-symmetry assumption.
+        Configurations whose magnetic axis lies further off the Z=0 symmetry
+        plane are treated as invalid (default 0.02).
     """
     mgrid_path: str
     nfp: int
@@ -199,6 +204,7 @@ class OptimizationConfig:
     ftol: Optional[float] = None
     ftol_relative: bool = True
     patience: int = 10
+    axis_z_tol: float = 1e-6
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
@@ -328,6 +334,15 @@ class StellaratorObjective:
         if not success:
             info["failure_type"] = FailureType.AXIS_NOT_FOUND.value
             info["failure_message"] = "Magnetic axis not found"
+            logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
+            return self.INVALID_FITNESS, info
+        if abs(axis_rz[1]) > self.cfg.axis_z_tol:
+            # Stellarator symmetry: the axis must lie on the Z=0 symmetry plane.
+            # A large |Z_axis| means the configuration is degenerate / broken,
+            # even though find_axis converged (early-warning validity check).
+            info["failure_type"] = FailureType.AXIS_OFF_SYMMETRY.value
+            info["failure_message"] = (f"Magnetic axis off symmetry plane "
+                                       f"(Z={axis_rz[1]:.4f} > tol={self.cfg.axis_z_tol})")
             logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
             return self.INVALID_FITNESS, info
         info["axis_rz"] = np.asarray(axis_rz, dtype=np.float64)
@@ -496,7 +511,12 @@ def _survey_worker_init(config: OptimizationConfig):
 
 
 def _survey_point(point) -> bool:
-    """Feasibility of one coil-current vector: magnetic axis found => feasible."""
+    """Feasibility of one coil-current vector.
+
+    Feasible iff a magnetic axis is found AND it lies on the Z=0 symmetry
+    plane (|Z_axis| <= axis_z_tol) — an off-plane axis means the configuration
+    is degenerate rather than a valid symmetric stellarator.
+    """
     cfg = _survey_cfg
     try:
         with _silent():
@@ -505,7 +525,9 @@ def _survey_point(point) -> bool:
                 cfg.initial_rz, xtol=1e-4, max_iter=40,
                 delta_r=0.01, verbose=False,
             )
-        return bool(axis_result[3])
+        if not axis_result[3]:
+            return False
+        return abs(axis_result[0][1]) <= cfg.axis_z_tol
     except Exception:
         return False
 

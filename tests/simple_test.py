@@ -1,50 +1,106 @@
-from ripplepy import (
-    set_extcur, initialize_mgrid_field, set_trace_parameters,
-    trace_fieldline, find_axis,compute_epstot
-)
-import numpy as np
+#!/usr/bin/env python3
+"""Simple smoke test for the ripplepy H1 pipeline.
+
+Loads the H1 mgrid, finds the magnetic axis, computes eps_eff^(3/2) on a
+surface offset from the axis, and (optionally) plots the traced field line.
+
+Fails loudly with a clear reason instead of crashing on a None result.
+
+Run:  python tests/simple_test.py
+"""
+
+import sys
 import time
 from pathlib import Path
 
-# BASE = str(Path(__file__).resolve().parent.parent)
-# DEVICE = "CFQS"
-# VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
-# MGRID_PATH = f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc"
-# extcur = None
-# INITIAL_RZ = (1.21, 0.0)
-# NFP = 2
-# FULL_TORUS = False
+import numpy as np
 
-BASE = str(Path(__file__).resolve().parent.parent)
+from ripplepy import (
+    compute_initial_gradpsi_nemov,
+    compute_epstot,
+    find_axis,
+    initialize_mgrid_field,
+    plot_fieldline_3d,
+    set_extcur,
+    set_trace_parameters,
+)
+
+# ---------------------------------------------------------------------------
+# Configuration (H1)
+# ---------------------------------------------------------------------------
 DEVICE = "H1"
-VMEC_PATH = f"{BASE}/tests/test_file/wout_h1_design.nc"
-MGRID_PATH = f"{BASE}/tests/test_file/mgrid_h1_design.nc"
-extcur = [50000, 5000, 2000, -80000, -40000]
-INITIAL_RZ = (1.26, 0.0)
+BASE = Path(__file__).resolve().parent.parent
+MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-initial_rz = (1.26, 0.0)
-
-
+EXTCUR = [72500.0, 2750.0, 1933.1, -90204.5, -51584.8]
+INITIAL_RZ = (1.26, 0.0)
+DELTA_R = 0.05           # radial offset of the traced surface from the axis
 NTURN = 200
 NPHI = 360
 NPART = 5000
+PLOT = True              # set False on a headless machine (needs plotly)
+AXIS_Z_TOL = 0.02        # |Z_axis| tolerance (stellarator-symmetry check)
 
-initialize_mgrid_field(MGRID_PATH, NFP, full_torus=FULL_TORUS)
-set_extcur(extcur) 
 
-axis_rz, R0_rp, axis_fl, ok = find_axis(INITIAL_RZ, xtol=1e-5, max_iter=100)
-print(f"  Axis: R={axis_rz[0]:.4f}, Z={axis_rz[1]:.4f}, R0={R0_rp:.4f}")
+def main():
+    print("=" * 60)
+    print(f"ripplepy simple test — {DEVICE}")
+    print("=" * 60)
 
-axis_rz[0]+= 0.05
+    print("\n[1] Loading mgrid + initialising field ...")
+    initialize_mgrid_field(MGRID_PATH, NFP, full_torus=FULL_TORUS)
+    set_extcur(EXTCUR)
 
-set_trace_parameters(NTURN, NPHI, npart=NPART, verbose=False)
-start_time = time.time()
-eps, bnd, ist = compute_epstot(
-    axis_rz,
-    initial_gradpsi=np.array([1, 0, 0], dtype=np.float64),
-    verbose=False,
-)
-end_time = time.time()
-print(f"  Time taken: {end_time - start_time:.4f} seconds")
-print(f" axis_rz = ({axis_rz[0]:.4f}, {axis_rz[1]:.4f}), eps_tot = {eps:.6e}")
+    print("\n[2] Searching for the magnetic axis ...")
+    axis_rz, R0, axis_fieldline, ok = find_axis(
+        INITIAL_RZ, xtol=1e-5, max_iter=100,delta_r=0.01, verbose=True)
+    if not ok or axis_rz is None:
+        print(f"  ✗ Magnetic axis not found for extcur={EXTCUR}. "
+              "Check the coil currents / mgrid file.")
+        sys.exit(1)
+    # Own copy — never mutate find_axis' result array in place.
+    axis_rz = np.asarray(axis_rz, dtype=np.float64)
+    print(f"  ✓ Axis: R={axis_rz[0]:.4f}, Z={axis_rz[1]:.4f}, R0={R0:.4f}")
+    if abs(axis_rz[1]) > AXIS_Z_TOL:
+        print(f"  ⚠ |Z_axis| = {abs(axis_rz[1]):.4f} > tol = {AXIS_Z_TOL}: "
+              "configuration is off the symmetry plane — result may be unreliable")
+
+    # Field-line start point: copy + offset.
+    start_rz = np.array([axis_rz[0] + DELTA_R, axis_rz[1]], dtype=np.float64)
+    initial_gradpsi = compute_initial_gradpsi_nemov(
+        EXTCUR, start_rz[0], start_rz[1], verbose=False)
+
+    print(f"\n[3] Tracing field line + computing eps_eff^(3/2) "
+          f"(nturn={NTURN}, nphi={NPHI}, npart={NPART}) ...")
+    set_trace_parameters(NTURN, NPHI, npart=NPART, verbose=False)
+    t0 = time.time()
+    eps, bnd, fieldline_data, istate = compute_epstot(
+        start_rz, initial_gradpsi=initial_gradpsi,
+        return_fieldline=True, verbose=False,
+    )
+    elapsed = time.time() - t0
+    if istate != 0 or eps is None:
+        print(f"  ✗ Field-line tracing / eps_eff failed (istate={istate}). "
+              "Try a different DELTA_R or extcur.")
+        sys.exit(1)
+    print(f"  ✓ eps_eff^(3/2) = {eps:.6e}  (time: {elapsed:.2f}s)")
+    print(f"  start_rz = ({start_rz[0]:.4f}, {start_rz[1]:.4f})")
+
+    if PLOT:
+        print("\n[4] Plotting the field line in 3D ...")
+        try:
+            fig = plot_fieldline_3d(fieldline_data, color_by_b=True)
+            # Headless-safe: save an interactive HTML (fig.show() opens a
+            # browser and can hang on a server without a display).
+            fig.show()
+        except ImportError:
+            print("  (plotly not installed — install with 'pip install plotly')")
+        except Exception as exc:
+            print(f"  (3D plot failed: {exc})")
+
+    print("\nDone.")
+
+
+if __name__ == "__main__":
+    main()
