@@ -175,6 +175,20 @@ class OptimizationConfig:
         Maximum allowed |Z_axis| (m) under the stellarator-symmetry assumption.
         Configurations whose magnetic axis lies further off the Z=0 symmetry
         plane are treated as invalid (default 0.02).
+    adapt_bounds : bool
+        If True (default), each generation checks whether the current best
+        presses a box edge; if so, a cheap local feasibility probe extends the
+        bound into the feasible region before continuing.
+    adapt_bounds_every : int
+        Check/adapt bounds every N generations (default 1 = every generation).
+    adapt_bounds_n_samples : int
+        Number of Sobol probe points used per bound-adaptation survey.
+    adapt_bounds_expand : float
+        How far beyond the pressed edge the probe extends (multiple of the
+        current coil range; default 1.5).
+    adapt_bounds_margin : float
+        A coil is "pressed" if the best value is within this fraction of the
+        coil's current range of the box edge (default 0.02 = 2%).
     """
     mgrid_path: str
     nfp: int
@@ -205,6 +219,11 @@ class OptimizationConfig:
     ftol_relative: bool = True
     patience: int = 10
     axis_z_tol: float = 1e-6
+    adapt_bounds: bool = True
+    adapt_bounds_every: int = 1
+    adapt_bounds_n_samples: int = 64
+    adapt_bounds_expand: float = 1.5
+    adapt_bounds_margin: float = 0.02
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
@@ -230,6 +249,8 @@ class OptimizationConfig:
             raise ValueError(
                 "initial_bounds must be shape (n_coils, 2) as [nominal, fraction] "
                 "or a 1-D array of nominal coil currents (auto-bounds).")
+        # Normalise so downstream code (e.g. the DE baseline) always sees 2-D.
+        self.initial_bounds = raw
         n_coils = len(raw)
         abs_bounds = np.empty((n_coils, 2), dtype=np.float64)
         for i in range(n_coils):
@@ -532,6 +553,27 @@ def _survey_point(point) -> bool:
         return False
 
 
+def _probe_point(cfg, point) -> bool:
+    """Feasibility probe used by the in-loop bounds adaptation.
+
+    Runs inside the persistent DE process pool (workers already hold the mgrid
+    field), so it must not create a new Pool.  Same feasibility criterion as
+    the survey: axis found AND on the Z=0 symmetry plane.
+    """
+    try:
+        with _silent():
+            set_extcur(np.asarray(point, dtype=np.float64))
+            axis_result = find_axis(
+                cfg.initial_rz, xtol=1e-6, max_iter=100,
+                delta_r=0.01, verbose=False,
+            )
+        if not axis_result[3]:
+            return False
+        return abs(axis_result[0][1]) <= cfg.axis_z_tol
+    except Exception:
+        return False
+
+
 def survey_feasibility(
     config: OptimizationConfig,
     n_samples: int = 256,
@@ -813,6 +855,9 @@ class DifferentialEvolution:
         self._best_fitness_history: list[float] = []
         self._patience_counter = 0
 
+        # Last probed best (bounds adaptation skips re-probing an unchanged best)
+        self._last_probe_best: np.ndarray | None = None
+
         # Persistent process pool (created once in run(), reused across gens)
         self._pool: Pool | None = None
 
@@ -969,6 +1014,10 @@ class DifferentialEvolution:
                 np.array2string(best_extcur, separator=', ',
                                 formatter={'float_kind': lambda x: '%.1f' % x}),
             )
+
+            # 4.5 Adaptive bounds: probe + widen if the best presses a box edge.
+            if gen % self.cfg.adapt_bounds_every == 0:
+                self._adapt_bounds_if_pressed(gen)
 
             # 5. Early stop via ftol
             if self._check_convergence(gen):
@@ -1155,6 +1204,114 @@ class DifferentialEvolution:
             self.fitnesses.append(float(fit))
             self.all_infos.append(info)
             self._axes[k] = info.get("axis_rz")
+
+    # ---- adaptive bounds ---------------------------------------------------
+
+    def _coil_pressed(self, best: np.ndarray) -> list[int]:
+        """Indices of coils whose best value sits near a box edge."""
+        lo = self.cfg._abs_bounds[:, 0]
+        hi = self.cfg._abs_bounds[:, 1]
+        span = hi - lo
+        margin = self.cfg.adapt_bounds_margin * span
+        pressed = []
+        for d in range(len(best)):
+            if span[d] <= 1e-12:               # locked coil — never "pressed"
+                continue
+            if best[d] <= lo[d] + margin[d] or best[d] >= hi[d] - margin[d]:
+                pressed.append(d)
+        return pressed
+
+    def _adapt_bounds_if_pressed(self, gen: int) -> bool:
+        """If the current best presses a box edge, probe the feasible extent
+        beyond it (localized Sobol survey in the DE pool) and widen the bound.
+
+        Returns True if the bounds changed.  The probe is skipped while the
+        best has not moved, so a wall is not re-surveyed every generation.
+        """
+        if not self.cfg.adapt_bounds or self._pool is None:
+            return False
+        best_idx = int(np.argmin(self.fitnesses))
+        best = self.pop[best_idx]
+        pressed = self._coil_pressed(best)
+        if not pressed:
+            self._last_probe_best = None
+            return False
+        if (self._last_probe_best is not None
+                and np.allclose(self._last_probe_best, best)):
+            return False
+        self._last_probe_best = best.copy()
+
+        lo = self.cfg._abs_bounds[:, 0]
+        hi = self.cfg._abs_bounds[:, 1]
+        n = len(best)
+
+        # Probe box: pressed directions extended by adapt_bounds_expand x range,
+        # all other coils locked at the current best value.
+        probe_lo = best.copy()
+        probe_hi = best.copy()
+        for d in range(n):
+            if d in pressed:
+                span = hi[d] - lo[d]
+                if best[d] >= hi[d] - 1e-12:
+                    probe_hi[d] = hi[d] + self.cfg.adapt_bounds_expand * span
+                if best[d] <= lo[d] + 1e-12:
+                    probe_lo[d] = lo[d] - self.cfg.adapt_bounds_expand * span
+
+        fracs = np.zeros(n)
+        for d in range(n):
+            if abs(best[d]) < 1e-12:
+                continue
+            fracs[d] = max(abs(probe_lo[d] - best[d]),
+                           abs(probe_hi[d] - best[d])) / abs(best[d])
+        probe_cfg = OptimizationConfig(
+            mgrid_path=self.cfg.mgrid_path,
+            nfp=self.cfg.nfp,
+            full_torus=self.cfg.full_torus,
+            initial_rz=self.cfg.initial_rz,
+            initial_bounds=np.column_stack([best, fracs]),
+            delt_r=self.cfg.delt_r,
+            processes=self.cfg.processes,
+            output_dir=self.cfg.output_dir,
+            axis_z_tol=self.cfg.axis_z_tol,
+        )
+
+        from functools import partial
+        from scipy.stats.qmc import Sobol
+        u = Sobol(d=n, scramble=True, seed=gen).random(self.cfg.adapt_bounds_n_samples)
+        points = probe_lo + u * (probe_hi - probe_lo)
+        try:
+            feasible = np.asarray(
+                self._pool.map(partial(_probe_point, probe_cfg), points),
+                dtype=bool)
+        except Exception as exc:
+            logger.warning("Gen %d: bounds probe failed: %s", gen, exc)
+            return False
+        if not feasible.any():
+            logger.info("Gen %d: best at bound on coils %s, probe found no "
+                        "feasible extension — keeping bounds", gen, pressed)
+            return False
+
+        changed = False
+        for d in pressed:
+            vals = points[feasible, d]
+            if best[d] >= hi[d] - 1e-12:
+                new_hi = float(np.percentile(vals, 95.0))
+                if new_hi > hi[d]:
+                    self.cfg._abs_bounds[d, 1] = new_hi
+                    changed = True
+            if best[d] <= lo[d] + 1e-12:
+                new_lo = float(np.percentile(vals, 5.0))
+                if new_lo < lo[d]:
+                    self.cfg._abs_bounds[d, 0] = new_lo
+                    changed = True
+        if changed:
+            logger.info("Gen %d: best at bound on coils %s — widened bounds "
+                        "after feasibility probe: %s", gen, pressed,
+                        np.round(self.cfg._abs_bounds, 1).tolist())
+        else:
+            logger.info("Gen %d: best at bound on coils %s, probe found no "
+                        "extension beyond the edge — keeping bounds", gen, pressed)
+        return changed
 
     # ---- convergence -------------------------------------------------------
 
