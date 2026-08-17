@@ -23,6 +23,7 @@ from ripplepy import (
     plot_fieldline_3d,
     set_extcur,
     set_trace_parameters,
+    calculate_plasma_params,
 )
 
 # ---------------------------------------------------------------------------
@@ -33,8 +34,8 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-EXTCUR = [67670.8, 3032.1, 0.0, 0.0, -106240.0]
-INITIAL_RZ = (1.052, 0.0)
+EXTCUR = [43946.5, 2713.9, 0.0, -2300.6, -87860.5]
+INITIAL_RZ = (1.1, 0.0)
 DELTA_R = 0.05           # radial offset of the traced surface from the axis
 NTURN = 400
 NPHI = 360
@@ -54,7 +55,7 @@ def main():
 
     print("\n[2] Searching for the magnetic axis ...")
     axis_rz, R0, axis_fieldline, ok = find_axis(
-        INITIAL_RZ, xtol=1e-5, max_iter=100,delta_r=0.01, verbose=True)
+        INITIAL_RZ, xtol=1e-5, max_iter=200,delta_r=0.01, verbose=True)
     if not ok or axis_rz is None:
         print(f"  ✗ Magnetic axis not found for extcur={EXTCUR}. "
               "Check the coil currents / mgrid file.")
@@ -86,6 +87,9 @@ def main():
         sys.exit(1)
     print(f"  ✓ eps_eff^(3/2) = {eps:.6e}  (time: {elapsed:.2f}s)")
     print(f"  start_rz = ({start_rz[0]:.4f}, {start_rz[1]:.4f})")
+
+    vol,am,iota = calculate_plasma_params(fieldline_data,axis_fieldline,NTURN,NPHI,R0)
+    print(f"Volume  of plasma: {vol:.3e},major radius = {am:.3e},iota = {iota:.3e}")
 
     if PLOT:
         print("\n[4] Plotting the field line in 3D ...")
