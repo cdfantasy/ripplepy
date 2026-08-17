@@ -177,11 +177,18 @@ class OptimizationConfig:
         Configurations whose magnetic axis lies further off the Z=0 symmetry
         plane are treated as invalid (default 0.02).
     min_minor_radius : float
-        Minimum acceptable minor radius (m).  A nearly-zero minor radius means
-        the magnetic surface has collapsed — the DE "improves" epsilon_eff by
-        shrinking the configuration to a thin tube, which is a numerical
-        artefact that fails at full resolution.  Such configurations are
-        rejected as invalid (default 0.02; healthy H1 surfaces are ~0.08-0.12).
+        Absolute lower bound on the acceptable minor radius (m).  A nearly-zero
+        minor radius means the magnetic surface has collapsed — the DE
+        "improves" epsilon_eff by shrinking the configuration to a thin tube,
+        which is a numerical artefact that fails at full resolution.  The
+        effective threshold is max(min_minor_radius, min_minor_radius_frac x
+        nominal_minor_radius), where nominal_minor_radius is measured when the
+        DE evaluates its nominal baseline (default 0.02).
+    min_minor_radius_frac : float
+        Fraction of the nominal configuration's minor radius that the
+        effective core-collapse threshold must reach (default 0.5: a surface
+        may shrink to no less than half the nominal size).  The nominal minor
+        radius is measured automatically on the first (nominal) evaluation.
     adapt_bounds : bool
         If True (default), each generation checks whether the current best
         presses a box edge; if so, a cheap local feasibility probe extends the
@@ -232,6 +239,7 @@ class OptimizationConfig:
     patience: int = 10
     axis_z_tol: float = 1e-6
     min_minor_radius: float = 0.02
+    min_minor_radius_frac: float = 0.5
     adapt_bounds: bool = True
     adapt_bounds_every: int = 1
     adapt_bounds_n_samples: int = 16
@@ -462,6 +470,7 @@ class StellaratorObjective:
             failure_type=FailureType.NONE.value,
             failure_message="",
         )
+        info["minor radius"] = float(minor_radius)
         info["Aspect ratio"] = float(Aspect_ratio)
         info["average B"] = float(
             bboundary[0] if hasattr(bboundary, "__len__") else bboundary
@@ -961,6 +970,19 @@ class DifferentialEvolution:
             logger.info("Nominal baseline ε = %.6e", start_fit)
             self._best_ever_fit = start_fit
             self._best_ever_ind = nominal_extcur.copy()
+            # Scale the core-collapse guard to the nominal configuration:
+            # reject surfaces that shrink below min_minor_radius_frac of the
+            # nominal minor radius, never below the absolute min_minor_radius.
+            nom_minor = start_info.get("minor radius")
+            if nom_minor is not None and np.isfinite(nom_minor):
+                scaled = self.cfg.min_minor_radius_frac * float(nom_minor)
+                if scaled > self.cfg.min_minor_radius:
+                    self.cfg.min_minor_radius = scaled
+                    logger.info(
+                        "min_minor_radius set to %.4f m (%.0f%% of nominal "
+                        "minor radius %.4f m)",
+                        self.cfg.min_minor_radius,
+                        self.cfg.min_minor_radius_frac * 100, nom_minor)
 
         self._init_population()
         self._evaluate_and_record(self.pop, gen=0)

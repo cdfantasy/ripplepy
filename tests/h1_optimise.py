@@ -61,9 +61,11 @@ VERIFY_NTURN = 400
 VERIFY_NPHI = 720
 VERIFY_NPART = 5000
 
-# Core-collapse guard: reject configurations whose minor radius collapses
-# below this (m).  The DE otherwise "improves" epsilon_eff by shrinking the
-# surface to a thin tube — a numerical artefact that fails at full res.
+# Core-collapse guard: absolute lower bound on the minor radius (m).  The DE
+# otherwise "improves" epsilon_eff by shrinking the surface to a thin tube — a
+# numerical artefact that fails at full res.  The effective threshold is
+# max(MIN_MINOR_RADIUS, 0.5 x nominal minor radius), scaled automatically from
+# the nominal evaluation (nominal minor radius ~0.106 m -> threshold ~0.053 m).
 MIN_MINOR_RADIUS = 0.02
 
 
