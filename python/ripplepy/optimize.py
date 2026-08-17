@@ -97,6 +97,7 @@ class FailureType(Enum):
     AXIS_OFF_SYMMETRY = "axis_off_symmetry"
     TRACING_FAILED = "tracing_failed"
     EPSILON_NAN = "epsilon_nan"
+    CORE_COLLAPSED = "core_collapsed"
     UNKNOWN = "unknown"
 
 
@@ -175,6 +176,12 @@ class OptimizationConfig:
         Maximum allowed |Z_axis| (m) under the stellarator-symmetry assumption.
         Configurations whose magnetic axis lies further off the Z=0 symmetry
         plane are treated as invalid (default 0.02).
+    min_minor_radius : float
+        Minimum acceptable minor radius (m).  A nearly-zero minor radius means
+        the magnetic surface has collapsed — the DE "improves" epsilon_eff by
+        shrinking the configuration to a thin tube, which is a numerical
+        artefact that fails at full resolution.  Such configurations are
+        rejected as invalid (default 0.02; healthy H1 surfaces are ~0.08-0.12).
     adapt_bounds : bool
         If True (default), each generation checks whether the current best
         presses a box edge; if so, a cheap local feasibility probe extends the
@@ -224,6 +231,7 @@ class OptimizationConfig:
     ftol_relative: bool = True
     patience: int = 10
     axis_z_tol: float = 1e-6
+    min_minor_radius: float = 0.02
     adapt_bounds: bool = True
     adapt_bounds_every: int = 1
     adapt_bounds_n_samples: int = 16
@@ -422,6 +430,20 @@ class StellaratorObjective:
             vol, minor_radius, iota = calculate_plasma_params(
                 fieldline_data, axis_fieldline, self.cfg.nturn, self.cfg.nphi, R0
             )
+            # Core-collapse guard: a nearly-zero minor radius means the surface
+            # has collapsed into a thin tube — the epsilon_eff "improvement" is
+            # numerical, not physical, and such configurations fail at full
+            # resolution.  Reject them (checked before Aspect_ratio to avoid a
+            # divide-by-zero on exactly zero radius).
+            if minor_radius < self.cfg.min_minor_radius:
+                info["failure_type"] = FailureType.CORE_COLLAPSED.value
+                info["failure_message"] = (
+                    f"minor radius {minor_radius:.6f} < "
+                    f"min_minor_radius {self.cfg.min_minor_radius}")
+                if not quiet:
+                    logger.warning("Gen %s, Ind %d: %s", gen, ind_idx,
+                                   info["failure_message"])
+                return self.INVALID_FITNESS, info
             Aspect_ratio = R0 / minor_radius
         except Exception as exc:
             logger.warning("Gen %d, Ind %d: plasma param calc failed: %s", gen, ind_idx, exc)

@@ -61,15 +61,26 @@ VERIFY_NTURN = 400
 VERIFY_NPHI = 720
 VERIFY_NPART = 5000
 
+# Core-collapse guard: reject configurations whose minor radius collapses
+# below this (m).  The DE otherwise "improves" epsilon_eff by shrinking the
+# surface to a thin tube — a numerical artefact that fails at full res.
+MIN_MINOR_RADIUS = 0.02
 
-def verify_extcur(extcur, label):
-    """Re-evaluate one extcur at full resolution in the main process."""
+
+def verify_extcur(extcur, label, initial_rz=INITIAL_RZ):
+    """Re-evaluate one extcur at full resolution in the main process.
+
+    initial_rz defaults to the nominal (1.26, 0) guess, but the verification
+    of the optimised solution passes the DE-recorded magnetic axis of the best
+    individual: find_axis is multi-stable, and a different starting guess can
+    converge to a different configuration branch for the same currents.
+    """
     from ripplepy import (
         set_extcur, find_axis, compute_initial_gradpsi_nemov,
         set_trace_parameters, compute_epstot,
     )
     set_extcur(extcur)
-    axis_rz, _, _, ok = find_axis(INITIAL_RZ, xtol=1e-6, max_iter=100,
+    axis_rz, _, _, ok = find_axis(initial_rz, xtol=1e-5, max_iter=100,
                                   delta_r=0.01, verbose=False)
     if not ok:
         print(f"  {label}: magnetic axis not found at full res")
@@ -168,6 +179,7 @@ def main():
         ftol=FTOL,
         patience=PATIENCE,
         seed=SEED,
+        min_minor_radius=MIN_MINOR_RADIUS,
     )
 
     print("\nStarting JADE optimisation …")
@@ -201,8 +213,22 @@ def main():
 
     # ── 5.  Full-resolution verification ──
     print("\n=== [verify] full-resolution re-evaluation ===")
+    # find_axis is multi-stable: verify the best solution from the SAME
+    # magnetic-axis branch the DE used (recorded per evaluation), otherwise a
+    # different starting guess can converge to a different configuration.
+    best_axis = None
+    for info in all_infos:
+        if (info.get("axis_rz") is not None
+                and np.allclose(info.get("extcur"), best_individual)
+                and abs(info.get("epsilon_eff", np.inf) - best_fitness) < 1e-12):
+            best_axis = np.asarray(info["axis_rz"], dtype=np.float64)
+            break
+    if best_axis is None:
+        print("  (best axis not found in history - verifying from nominal guess)")
+        best_axis = INITIAL_RZ
+
     verify_extcur(NOMINAL_EXTCUR, "nominal")
-    verify_extcur(best_individual, "best    ")
+    verify_extcur(best_individual, "best    ", initial_rz=best_axis)
 
     # ── 6.  Convergence plot ──
     try:
