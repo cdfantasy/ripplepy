@@ -182,7 +182,12 @@ class OptimizationConfig:
     adapt_bounds_every : int
         Check/adapt bounds every N generations (default 1 = every generation).
     adapt_bounds_n_samples : int
-        Number of Sobol probe points used per bound-adaptation survey.
+        Number of equally-spaced probe points per pressed direction used in the
+        1-D bound-adaptation scan (default 16).
+    adapt_bounds_max_invalid : float
+        Skip the bound-adaptation probe while more than this fraction of the
+        population is invalid — widening into a region the DE cannot use would
+        only add more failures (default 0.3).
     adapt_bounds_expand : float
         How far beyond the pressed edge the probe extends (multiple of the
         current coil range; default 1.5).
@@ -221,7 +226,8 @@ class OptimizationConfig:
     axis_z_tol: float = 1e-6
     adapt_bounds: bool = True
     adapt_bounds_every: int = 1
-    adapt_bounds_n_samples: int = 64
+    adapt_bounds_n_samples: int = 16
+    adapt_bounds_max_invalid: float = 0.3
     adapt_bounds_expand: float = 1.5
     adapt_bounds_margin: float = 0.02
 
@@ -302,9 +308,16 @@ class StellaratorObjective:
     def __init__(self, config: OptimizationConfig):
         self.cfg = config
 
-    def evaluate(self, extcur_free: np.ndarray, gen: int, ind_idx: int
-                 ) -> tuple[float, dict]:
+    def evaluate(self, extcur_free: np.ndarray, gen: int, ind_idx: int,
+                 quiet: bool = False) -> tuple[float, dict]:
         """Run the full evaluation chain.
+
+        Parameters
+        ----------
+        quiet : bool
+            If True, suppress per-evaluation warnings and the stdout summary
+            line (used by the cheap in-loop bounds probe, which must run the
+            same criterion without flooding the log).
 
         Returns
         -------
@@ -355,7 +368,9 @@ class StellaratorObjective:
         if not success:
             info["failure_type"] = FailureType.AXIS_NOT_FOUND.value
             info["failure_message"] = "Magnetic axis not found"
-            logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
+            if not quiet:
+                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                               info["failure_message"])
             return self.INVALID_FITNESS, info
         if abs(axis_rz[1]) > self.cfg.axis_z_tol:
             # Stellarator symmetry: the axis must lie on the Z=0 symmetry plane.
@@ -364,7 +379,9 @@ class StellaratorObjective:
             info["failure_type"] = FailureType.AXIS_OFF_SYMMETRY.value
             info["failure_message"] = (f"Magnetic axis off symmetry plane "
                                        f"(Z={axis_rz[1]:.4f} > tol={self.cfg.axis_z_tol})")
-            logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
+            if not quiet:
+                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                               info["failure_message"])
             return self.INVALID_FITNESS, info
         info["axis_rz"] = np.asarray(axis_rz, dtype=np.float64)
 
@@ -387,13 +404,17 @@ class StellaratorObjective:
         if trace_istate != 0 or epsilon_eff is None:
             info["failure_type"] = FailureType.TRACING_FAILED.value
             info["failure_message"] = f"Field-line tracing failed (istate={trace_istate})"
-            logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
+            if not quiet:
+                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                               info["failure_message"])
             return self.INVALID_FITNESS, info
 
         if np.isnan(epsilon_eff) or np.isinf(epsilon_eff):
             info["failure_type"] = FailureType.EPSILON_NAN.value
             info["failure_message"] = f"epsilon_eff is {epsilon_eff}"
-            logger.warning("Gen %d, Ind %d: %s", gen, ind_idx, info["failure_message"])
+            if not quiet:
+                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                               info["failure_message"])
             return self.INVALID_FITNESS, info
 
         # --- plasma parameters ---
@@ -406,7 +427,10 @@ class StellaratorObjective:
             logger.warning("Gen %d, Ind %d: plasma param calc failed: %s", gen, ind_idx, exc)
             vol, minor_radius, iota = np.nan, np.nan, np.nan
         
-        print(f"Gen {gen}, Ind {ind_idx}: Axis @ R = {axis_rz[0]:.3f}, epsilon_eff = {epsilon_eff:.3e},iota = {iota:.3f} ,minor radius = {minor_radius:.3f}")
+        if not quiet:
+            print(f"Gen {gen}, Ind {ind_idx}: Axis @ R = {axis_rz[0]:.3f}, "
+                  f"epsilon_eff = {epsilon_eff:.3e}, iota = {iota:.3f} ,"
+                  f"minor radius = {minor_radius:.3f}")
 
         info.update(
             epsilon_eff=float(epsilon_eff),
@@ -553,23 +577,24 @@ def _survey_point(point) -> bool:
         return False
 
 
-def _probe_point(cfg, point) -> bool:
+def _probe_point_full(cfg, point) -> bool:
     """Feasibility probe used by the in-loop bounds adaptation.
 
+    Runs the REAL evaluation chain (find_axis + Z-symmetry + nturn trace +
+    NaN check) with logging suppressed, so a point marked feasible here is
+    guaranteed to be usable by the DE — this is the criterion that was
+    previously inconsistent with the DE evaluation (find_axis-only probes
+    widened the box into regions where the nturn trace then failed, drowning
+    the population in invalid trials).
+
     Runs inside the persistent DE process pool (workers already hold the mgrid
-    field), so it must not create a new Pool.  Same feasibility criterion as
-    the survey: axis found AND on the Z=0 symmetry plane.
+    field), so it must not create a new Pool.
     """
     try:
-        with _silent():
-            set_extcur(np.asarray(point, dtype=np.float64))
-            axis_result = find_axis(
-                cfg.initial_rz, xtol=1e-6, max_iter=100,
-                delta_r=0.01, verbose=False,
-            )
-        if not axis_result[3]:
-            return False
-        return abs(axis_result[0][1]) <= cfg.axis_z_tol
+        fit, _ = StellaratorObjective(cfg).evaluate(
+            np.asarray(point, dtype=np.float64), gen="probe", ind_idx=-1,
+            quiet=True)
+        return fit < StellaratorObjective.INVALID_FITNESS
     except Exception:
         return False
 
@@ -1222,14 +1247,32 @@ class DifferentialEvolution:
         return pressed
 
     def _adapt_bounds_if_pressed(self, gen: int) -> bool:
-        """If the current best presses a box edge, probe the feasible extent
-        beyond it (localized Sobol survey in the DE pool) and widen the bound.
+        """If the current best presses a box edge, scan along the pressed
+        direction(s) in the DE pool and widen the bound to the deepest point
+        that still passes the FULL evaluation criterion (identical to the DE
+        fitness: find_axis + Z-symmetry + nturn trace + NaN check).
 
         Returns True if the bounds changed.  The probe is skipped while the
         best has not moved, so a wall is not re-surveyed every generation.
+
+        Hard constraint: coil currents must never change sign.  Widened bounds
+        are clamped to [0, +inf) for positive-nominal coils and to (-inf, 0]
+        for negative-nominal coils.
         """
         if not self.cfg.adapt_bounds or self._pool is None:
             return False
+
+        # Do not widen while the population is already drowning in invalid
+        # trials — the new region would only add more failures.
+        invalid_ratio = np.mean(
+            [f >= StellaratorObjective.INVALID_FITNESS for f in self.fitnesses])
+        if invalid_ratio > self.cfg.adapt_bounds_max_invalid:
+            logger.info(
+                "Gen %d: best at bound but invalid=%.0f%% > %.0f%% — "
+                "skipping bounds probe", gen, invalid_ratio * 100,
+                self.cfg.adapt_bounds_max_invalid * 100)
+            return False
+
         best_idx = int(np.argmin(self.fitnesses))
         best = self.pop[best_idx]
         pressed = self._coil_pressed(best)
@@ -1244,44 +1287,34 @@ class DifferentialEvolution:
         lo = self.cfg._abs_bounds[:, 0]
         hi = self.cfg._abs_bounds[:, 1]
         n = len(best)
+        K = self.cfg.adapt_bounds_n_samples
+        nominal = self.cfg.initial_bounds[:, 0]
 
-        # Probe box: pressed directions extended by adapt_bounds_expand x range,
-        # all other coils locked at the current best value.
-        probe_lo = best.copy()
-        probe_hi = best.copy()
-        for d in range(n):
-            if d in pressed:
-                span = hi[d] - lo[d]
-                if best[d] >= hi[d] - 1e-12:
-                    probe_hi[d] = hi[d] + self.cfg.adapt_bounds_expand * span
-                if best[d] <= lo[d] + 1e-12:
-                    probe_lo[d] = lo[d] - self.cfg.adapt_bounds_expand * span
-
-        fracs = np.zeros(n)
-        for d in range(n):
-            if abs(best[d]) < 1e-12:
-                continue
-            fracs[d] = max(abs(probe_lo[d] - best[d]),
-                           abs(probe_hi[d] - best[d])) / abs(best[d])
-        probe_cfg = OptimizationConfig(
-            mgrid_path=self.cfg.mgrid_path,
-            nfp=self.cfg.nfp,
-            full_torus=self.cfg.full_torus,
-            initial_rz=self.cfg.initial_rz,
-            initial_bounds=np.column_stack([best, fracs]),
-            delt_r=self.cfg.delt_r,
-            processes=self.cfg.processes,
-            output_dir=self.cfg.output_dir,
-            axis_z_tol=self.cfg.axis_z_tol,
-        )
+        # 1-D scan per pressed direction: K equally-spaced points from the box
+        # edge outward to edge +- expand x range; all other coils locked at the
+        # current best value.
+        points = []
+        dirs = []          # +1 = outward beyond hi, -1 = outward beyond lo
+        for d in pressed:
+            span = hi[d] - lo[d]
+            if best[d] >= hi[d] - 1e-12:
+                xs = np.linspace(
+                    hi[d], hi[d] + self.cfg.adapt_bounds_expand * span, K)
+                dirs.append(1)
+            else:
+                xs = np.linspace(
+                    lo[d], lo[d] - self.cfg.adapt_bounds_expand * span, K)
+                dirs.append(-1)
+            for x in xs:
+                p = best.copy()
+                p[d] = x
+                points.append(p)
+        points = np.asarray(points)
 
         from functools import partial
-        from scipy.stats.qmc import Sobol
-        u = Sobol(d=n, scramble=True, seed=gen).random(self.cfg.adapt_bounds_n_samples)
-        points = probe_lo + u * (probe_hi - probe_lo)
         try:
             feasible = np.asarray(
-                self._pool.map(partial(_probe_point, probe_cfg), points),
+                self._pool.map(partial(_probe_point_full, self.cfg), points),
                 dtype=bool)
         except Exception as exc:
             logger.warning("Gen %d: bounds probe failed: %s", gen, exc)
@@ -1291,16 +1324,25 @@ class DifferentialEvolution:
                         "feasible extension — keeping bounds", gen, pressed)
             return False
 
+        # Widen each pressed bound to the deepest feasible scan point,
+        # clamped so the coil current never changes sign.
         changed = False
-        for d in pressed:
-            vals = points[feasible, d]
-            if best[d] >= hi[d] - 1e-12:
-                new_hi = float(np.percentile(vals, 95.0))
+        for k, d in enumerate(pressed):
+            seg = feasible[k * K:(k + 1) * K]
+            vals = points[k * K:(k + 1) * K, d]
+            if not seg.any():
+                continue
+            if dirs[k] > 0:
+                new_hi = float(vals[seg].max())
+                if nominal[d] < 0.0:
+                    new_hi = min(new_hi, 0.0)   # never flip sign
                 if new_hi > hi[d]:
                     self.cfg._abs_bounds[d, 1] = new_hi
                     changed = True
-            if best[d] <= lo[d] + 1e-12:
-                new_lo = float(np.percentile(vals, 5.0))
+            else:
+                new_lo = float(vals[seg].min())
+                if nominal[d] > 0.0:
+                    new_lo = max(new_lo, 0.0)   # never flip sign
                 if new_lo < lo[d]:
                     self.cfg._abs_bounds[d, 0] = new_lo
                     changed = True
