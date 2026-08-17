@@ -48,7 +48,7 @@ EXPLORE_EXPAND = 1.5
 
 # Differential Evolution (JADE) settings
 N_POP = 40
-MAX_GEN = 100
+MAX_GEN = 30
 FTOL = 1e-8
 PATIENCE = 15
 SEED = 42

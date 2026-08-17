@@ -522,7 +522,7 @@ def _survey_point(point) -> bool:
         with _silent():
             set_extcur(np.asarray(point, dtype=np.float64))
             axis_result = find_axis(
-                cfg.initial_rz, xtol=1e-4, max_iter=40,
+                cfg.initial_rz, xtol=1e-6, max_iter=100,
                 delta_r=0.01, verbose=False,
             )
         if not axis_result[3]:
@@ -1057,17 +1057,36 @@ class DifferentialEvolution:
         """Sample CR from a Normal distribution around mu_CR, clamped to [0, 1]."""
         return min(1.0, max(0.0, random.gauss(self.mu_CR, 0.1)))
 
-    def _pick_jade_partners(self, i: int, n_pop: int, n_pool: int
-                            ) -> tuple[int, int]:
-        """Distinct partner indices for JADE (r1 in pop, r2 in pop ∪ archive)."""
-        r1 = random.randrange(n_pop - 1)
-        if r1 >= i:
-            r1 += 1
-        while True:
-            r2 = random.randrange(n_pool)
-            if r2 < n_pop and (r2 == i or r2 == r1):
-                continue
-            break
+    def _pick_jade_partners(self, i: int, population: list[np.ndarray],
+                            pool: list[np.ndarray]) -> tuple[int, int]:
+        """Distinct partner indices for JADE mutation.
+
+        r1 is a population index, r2 an index into pop ∪ archive.  Both are
+        chosen to be value-DIFFERENT from the target individual and from each
+        other — clones (identical coil vectors) are never used as mutation
+        partners, otherwise the differential x_r1 − x_r2 vanishes and the
+        population stagnates on a single point.
+        """
+        n_pop = len(population)
+        x_i = population[i]
+
+        pop_cands = [k for k in range(n_pop)
+                     if not np.array_equal(population[k], x_i)]
+        if not pop_cands:                       # fully collapsed — safety fallback
+            pop_cands = list(range(n_pop))
+        r1 = random.choice(pop_cands)
+        x_r1 = population[r1]
+
+        n_pool = len(pool)
+        pool_cands = [k for k in range(n_pool)
+                      if not np.array_equal(pool[k], x_i)]
+        if not pool_cands:
+            pool_cands = list(range(n_pool))
+        r2_cands = [k for k in pool_cands
+                    if not np.array_equal(pool[k], x_r1)]
+        if not r2_cands:
+            r2_cands = list(pool_cands)
+        r2 = random.choice(r2_cands)
         return r1, r2
 
     def _generate_trials_jade(self, population: list[np.ndarray]
@@ -1078,7 +1097,6 @@ class DifferentialEvolution:
         n_pbest = max(1, int(round(self.cfg.p_best * n)))
         pbest_pool = order[:n_pbest].tolist()
         pool = population + self.archive
-        n_pool = len(pool)
 
         trials: list[np.ndarray] = []
         F_vals = np.empty(n, dtype=np.float64)
@@ -1089,7 +1107,7 @@ class DifferentialEvolution:
             F_vals[i], CR_vals[i] = F, CR
             x_i = population[i]
             x_pbest = population[random.choice(pbest_pool)]
-            r1, r2 = self._pick_jade_partners(i, n, n_pool)
+            r1, r2 = self._pick_jade_partners(i, population, pool)
             mutant = np.empty_like(x_i)
             for d in range(len(x_i)):
                 mutant[d] = (x_i[d]
