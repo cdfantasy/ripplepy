@@ -29,9 +29,12 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
         0.0,
     ])
 
-    # Iota profile from VMEC (for the benchmark plot)
+    # Iota profile from VMEC (for the benchmark plot), interpolated onto the
+    # same s values as the eps points — the s -> R mapping is already done in
+    # RZ_points, so iota shares the Radius axis.
     iota_profile = np.asarray(vmec.wout.iotas)
     s_iota = np.linspace(0.0, 1.0, len(iota_profile))
+    iota_at_s = np.interp(sur_idx, s_iota, iota_profile)
 
     # RZ start points
     RZ_points = []
@@ -114,17 +117,19 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
             print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  {rp_old[i]:12.4e}  {o:8.4f}"
                 f"{ripplepy[i]:12.4e}  {n:8.4f}")        
         from matplotlib import pyplot as plt
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6))
-        ax1.plot(sur_idx, py_eps, 'o-', label='pyneo')
-        ax1.plot(sur_idx, rp_old, 'x-', label='ripplepy(old)')
-        ax1.plot(sur_idx, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
-        ax1.set_xlabel('s'); ax1.set_ylabel('eps_tot')
-        ax1.set_title(f"{name} Benchmark: eps_tot vs s")
-        ax1.legend(); ax1.grid(True)
-        ax2.plot(s_iota, iota_profile, 'o-', color='C2')
-        ax2.set_xlabel('s'); ax2.set_ylabel('iota')
-        ax2.set_title(f"{name}: iota profile (VMEC)")
-        ax2.grid(True)
+        fig, ax1 = plt.subplots(figsize=(9, 6))
+        ax1.plot(Radius, py_eps, 'o-', label='pyneo')
+        ax1.plot(Radius, rp_old, 'x-', label='ripplepy(old)')
+        ax1.plot(Radius, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
+        ax1.set_xlabel('R'); ax1.set_ylabel('eps_tot', color='C0')
+        ax1.set_title(f"{name} Benchmark: eps_tot vs R")
+        ax1.grid(True)
+        ax2 = ax1.twinx()
+        ax2.plot(Radius, iota_at_s, 's--', color='C2', label='iota (VMEC)')
+        ax2.set_ylabel('iota', color='C2')
+        ax2.tick_params(axis='y', labelcolor='C2')
+        lines = ax1.get_lines() + ax2.get_lines()
+        ax1.legend(lines, [l.get_label() for l in lines], loc='best')
         fig.tight_layout(); plt.show()
 
         
@@ -141,16 +146,18 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
                 f"{ripplepy[i]:12.4e}  {n:8.4f}")        
     # plot
         from matplotlib import pyplot as plt
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6))
+        fig, ax1 = plt.subplots(figsize=(9, 6))
         ax1.plot(Radius, py_eps, 'o-', label='pyneo')
         ax1.plot(Radius, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
-        ax1.set_xlabel('R'); ax1.set_ylabel('eps_tot')
+        ax1.set_xlabel('R'); ax1.set_ylabel('eps_tot', color='C0')
         ax1.set_title(f"{name} Benchmark: eps_tot vs R")
-        ax1.legend(); ax1.grid(True)
-        ax2.plot(s_iota, iota_profile, 'o-', color='C2')
-        ax2.set_xlabel('s'); ax2.set_ylabel('iota')
-        ax2.set_title(f"{name}: iota profile (VMEC)")
-        ax2.grid(True)
+        ax1.grid(True)
+        ax2 = ax1.twinx()
+        ax2.plot(Radius, iota_at_s, 's--', color='C2', label='iota (VMEC)')
+        ax2.set_ylabel('iota', color='C2')
+        ax2.tick_params(axis='y', labelcolor='C2')
+        lines = ax1.get_lines() + ax2.get_lines()
+        ax1.legend(lines, [l.get_label() for l in lines], loc='best')
         fig.tight_layout(); plt.show()
 
         
