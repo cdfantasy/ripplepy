@@ -29,6 +29,10 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
         0.0,
     ])
 
+    # Iota profile from VMEC (for the benchmark plot)
+    iota_profile = np.asarray(vmec.wout.iotas)
+    s_iota = np.linspace(0.0, 1.0, len(iota_profile))
+
     # RZ start points
     RZ_points = []
     for s in sur_idx:
@@ -36,6 +40,7 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
         rpz = surf.cross_section(phi=0)[0]
         RZ_points.append(rpz[[0, 2]])
     RZ_points = np.asarray(RZ_points)
+    Radius = RZ_points[:,0]
 
     print("  Running pyneo...")
 
@@ -109,34 +114,44 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
             print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  {rp_old[i]:12.4e}  {o:8.4f}"
                 f"{ripplepy[i]:12.4e}  {n:8.4f}")        
         from matplotlib import pyplot as plt
-        plt.figure(figsize=(8,6))
-        plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
-        plt.plot(sur_idx, rp_old, 'x-', label='ripplepy(old)')
-        plt.plot(sur_idx, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
-        plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
-        plt.title(f"{name} Benchmark: eps_tot vs s")
-        plt.tight_layout(); plt.show()
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6))
+        ax1.plot(sur_idx, py_eps, 'o-', label='pyneo')
+        ax1.plot(sur_idx, rp_old, 'x-', label='ripplepy(old)')
+        ax1.plot(sur_idx, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
+        ax1.set_xlabel('s'); ax1.set_ylabel('eps_tot')
+        ax1.set_title(f"{name} Benchmark: eps_tot vs s")
+        ax1.legend(); ax1.grid(True)
+        ax2.plot(s_iota, iota_profile, 'o-', color='C2')
+        ax2.set_xlabel('s'); ax2.set_ylabel('iota')
+        ax2.set_title(f"{name}: iota profile (VMEC)")
+        ax2.grid(True)
+        fig.tight_layout(); plt.show()
 
         
         return py_eps,rp_old, ripplepy        
     # ── ripplepy (new pyneo-style) ──
 
     else:
-        print(f"\n  {'s':>6s}  {'pyneo':>12s}  "
+        print(f"\n  {'R':>6s}  {'pyneo':>12s}  "
             f"{'ripplepy':>12s}  {'new/py':>8s}")
         print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8}")
         for i in range(len(sur_idx)):
             n = ripplepy[i] / py_eps[i] if py_eps[i] != 0 else np.nan
-            print(f"  {sur_idx[i]:6.3f}  {py_eps[i]:12.4e}  "
+            print(f"  {Radius[i]:6.3f}  {py_eps[i]:12.4e}  "
                 f"{ripplepy[i]:12.4e}  {n:8.4f}")        
     # plot
         from matplotlib import pyplot as plt
-        plt.figure(figsize=(8,6))
-        plt.plot(sur_idx, py_eps, 'o-', label='pyneo')
-        plt.plot(sur_idx, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
-        plt.xlabel('s'); plt.ylabel('eps_tot'); plt.title(f'{name} Benchmark'); plt.legend(); plt.grid(True)
-        plt.title(f"{name} Benchmark: eps_tot vs s")
-        plt.tight_layout(); plt.show()
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 6))
+        ax1.plot(Radius, py_eps, 'o-', label='pyneo')
+        ax1.plot(Radius, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
+        ax1.set_xlabel('R'); ax1.set_ylabel('eps_tot')
+        ax1.set_title(f"{name} Benchmark: eps_tot vs R")
+        ax1.legend(); ax1.grid(True)
+        ax2.plot(s_iota, iota_profile, 'o-', color='C2')
+        ax2.set_xlabel('s'); ax2.set_ylabel('iota')
+        ax2.set_title(f"{name}: iota profile (VMEC)")
+        ax2.grid(True)
+        fig.tight_layout(); plt.show()
 
         
         return py_eps, ripplepy
@@ -147,32 +162,34 @@ BASE = str(Path(__file__).resolve().parent.parent)
 # ═══════════════════════════════════════════════════════════════
 # w7x
 # ═══════════════════════════════════════════════════════════════
-run_benchmark(
-    "w7x",
-    f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
-    f"{BASE}/tests/test_file/w7x_boozmn.nc",
-    f"{BASE}/tests/test_file/mgrid_w7-x.nc",
-    None, 5,
-    np.linspace(0.1, 0.2, 11),
-    nturn=200, nphi=180, npart=50,
-    full_torus=False,
-)
+
+
+# run_benchmark(
+#     "w7x",
+#     f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
+#     f"{BASE}/tests/test_file/w7x_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_w7-x.nc",
+#     None, 5,
+#     np.linspace(0.1, 1, 11),
+#     nturn=400, nphi=360, npart=5000,
+#     full_torus=False,
+# )
 
 # ═══════════════════════════════════════════════════════════════
 # CFQS
 # ═══════════════════════════════════════════════════════════════
 
 
-# run_benchmark(
-#     "CFQS",
-#     f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
-#     f"{BASE}/tests/test_file/cfqs_boozmn.nc",
-#     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
-#     None, 2,
-#     np.linspace(0.1, 1, 11),
-#     nturn=100, nphi=100, npart=500,
-#     full_torus=False,
-# )
+run_benchmark(
+    "CFQS",
+    f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
+    f"{BASE}/tests/test_file/cfqs_boozmn.nc",
+    f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
+    None, 2,
+    np.linspace(0.1, 1, 11),
+    nturn=400, nphi=360, npart=5000,
+    full_torus=False,
+)
 
 # ═══════════════════════════════════════════════════════════════
 # H1
@@ -184,6 +201,6 @@ run_benchmark(
 #     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
 #     [50000, 5000, 0, -80000, -40000], 3,
 #     np.linspace(0.1, 1, 11),
-#     nturn=200, nphi=360, npart=5000,
+#     nturn=400, nphi=360, npart=5000,
 #     full_torus=False,
 # )
