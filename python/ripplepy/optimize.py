@@ -334,11 +334,18 @@ class StellaratorObjective:
         self.cfg = config
 
     def evaluate(self, extcur_free: np.ndarray, gen: int, ind_idx: int,
+                 initial_rz: Optional[np.ndarray] = None,
                  quiet: bool = False) -> tuple[float, dict]:
         """Run the full evaluation chain.
 
         Parameters
         ----------
+        initial_rz : ndarray or None
+            Optional first-choice (R, Z) guess for find_axis.  The DE passes
+            the parent individual's recorded axis here; if that guess fails,
+            the search falls back to the config-level nominal guess.  This
+            keeps the warm-start benefit without locking every trial to the
+            previous generation's best axis basin.
         quiet : bool
             If True, suppress per-evaluation warnings and the stdout summary
             line (used by the cheap in-loop bounds probe, which must run the
@@ -383,11 +390,36 @@ class StellaratorObjective:
         }
 
         # --- find magnetic axis ---
-        with _silent():
-            axis_result = find_axis(
-                self.cfg.initial_rz,
-                xtol=1e-5, max_iter=100, delta_r=0.01, verbose=False,
-            )
+        # Multi-guess: first try the per-individual warm-start guess (parent
+        # axis for DE trials), then the config-level nominal guess.  A single
+        # global warm-start (e.g. always the previous best's axis) biases the
+        # search: trials whose real axis lives in another basin get killed by
+        # AXIS_NOT_FOUND even though they form a valid configuration.
+        guesses: list[np.ndarray] = []
+        if initial_rz is not None:
+            guesses.append(np.asarray(initial_rz, dtype=np.float64))
+        cfg_guess = np.asarray(self.cfg.initial_rz, dtype=np.float64)
+        if not any(np.allclose(g, cfg_guess) for g in guesses):
+            guesses.append(cfg_guess)
+
+        axis_result = None
+        first_success = None
+        for guess in guesses:
+            try:
+                with _silent():
+                    axis_result = find_axis(
+                        guess,
+                        xtol=1e-5, max_iter=100, delta_r=0.01, verbose=False,
+                    )
+            except Exception:
+                axis_result = (None, None, None, False)
+            if axis_result[3]:
+                if first_success is None:
+                    first_success = axis_result
+                if abs(axis_result[0][1]) <= self.cfg.axis_z_tol:
+                    break
+        if axis_result is None and first_success is not None:
+            axis_result = first_success
         axis_rz, R0, axis_fieldline, success = axis_result
         if not success:
             info["failure_type"] = FailureType.AXIS_NOT_FOUND.value
@@ -629,7 +661,7 @@ def _survey_point(point) -> bool:
         return False
 
 
-def _probe_point_full(cfg, point) -> bool:
+def _probe_point_full(cfg, point, initial_rz=None) -> bool:
     """Feasibility probe used by the in-loop bounds adaptation.
 
     Runs the REAL evaluation chain (find_axis + Z-symmetry + nturn trace +
@@ -645,7 +677,7 @@ def _probe_point_full(cfg, point) -> bool:
     try:
         fit, _ = StellaratorObjective(cfg).evaluate(
             np.asarray(point, dtype=np.float64), gen="probe", ind_idx=-1,
-            quiet=True)
+            initial_rz=initial_rz, quiet=True)
         return fit < StellaratorObjective.INVALID_FITNESS
     except Exception:
         return False
@@ -1092,14 +1124,18 @@ class DifferentialEvolution:
                     mutant = self._mutate(self.pop[i], self.pop)
                     trials.append(self._crossover(self.pop[i], mutant))
 
-            # 2. Evaluate
-            trial_fitnesses, trial_infos = self._evaluate_batch(trials, gen)
+            # 2. Evaluate (each trial warm-starts from its own parent's axis,
+            # NOT from the previous generation's best axis — the latter locks
+            # the search to one magnetic-axis basin).
+            trial_fitnesses, trial_infos = self._evaluate_batch(
+                trials, gen, initial_rz_list=self._axes)
 
             # 3. Selection (elitism: the current best is never re-initialised)
             invalid_solutions = 0
             accepted: list[int] = []
             reinit_indices: list[int] = []
             reinit_individuals: list[np.ndarray] = []
+            reinit_axes: list[np.ndarray | None] = []
             best_idx = int(np.argmin(self.fitnesses))
             for i in range(self.cfg.n_pop):
                 tf = trial_fitnesses[i]
@@ -1114,8 +1150,11 @@ class DifferentialEvolution:
                     # Re-initialise this individual (never the current best —
                     # its trials failing says nothing about its own quality).
                     # Collected here and evaluated as one parallel batch below.
+                    new_ind, base_idx = self._reinit_individual()
                     reinit_indices.append(i)
-                    reinit_individuals.append(self._reinit_individual())
+                    reinit_individuals.append(new_ind)
+                    reinit_axes.append(self._axes[base_idx]
+                                       if base_idx >= 0 else None)
                 elif self.invalid_count[i] >= 3:
                     # Protected best: keep it, reset its failure counter.
                     self.invalid_count[i] = 0
@@ -1137,7 +1176,8 @@ class DifferentialEvolution:
             # made high-invalid generations take minutes).
             if reinit_indices:
                 reinit_fits, reinit_infos = self._evaluate_batch(
-                    reinit_individuals, gen, indices=reinit_indices)
+                    reinit_individuals, gen, indices=reinit_indices,
+                    initial_rz_list=reinit_axes)
                 for i, new_ind, new_fit, new_info in zip(
                         reinit_indices, reinit_individuals,
                         reinit_fits, reinit_infos):
@@ -1164,10 +1204,9 @@ class DifferentialEvolution:
                 self._best_ever_ind = self.pop[best_idx].copy()
             self._best_fitness_history.append(self._best_ever_fit)
 
-            # Warm-start the magnetic-axis search for the next generation.
-            axis_guess = self._axes[best_idx]
-            if axis_guess is not None:
-                self.cfg.initial_rz = axis_guess
+            # No global axis warm-start here: cfg.initial_rz stays at the
+            # nominal guess for all evaluations.  Per-individual warm-start is
+            # handled in step 2 via each trial's own parent axis.
 
             pct_invalid = invalid_solutions / self.cfg.n_pop * 100
             best_extcur = self.pop[best_idx]
@@ -1183,7 +1222,8 @@ class DifferentialEvolution:
 
             # 4.5 Adaptive bounds: probe + widen if the best presses a box edge.
             if gen % self.cfg.adapt_bounds_every == 0:
-                self._adapt_bounds_if_pressed(gen)
+                self._adapt_bounds_if_pressed(
+                    gen, invalid_ratio=invalid_solutions / self.cfg.n_pop)
 
             # 5. Early stop via ftol
             if self._check_convergence(gen):
@@ -1224,7 +1264,7 @@ class DifferentialEvolution:
             for i in range(self.n_dim)
         ], dtype=np.float64)
 
-    def _reinit_individual(self) -> np.ndarray:
+    def _reinit_individual(self) -> tuple[np.ndarray, int]:
         """Re-initialise near a random FEASIBLE population member.
 
         Each coil is perturbed by +- reinit_perturb_frac of the current box
@@ -1233,18 +1273,22 @@ class DifferentialEvolution:
         small fraction of the box, and re-seeding far from any known-feasible
         point is what collapses the population into a few clones.  Falls back
         to whole-box sampling when no feasible member exists yet.
+
+        Returns (new_individual, base_index); base_index is -1 for the
+        whole-box fallback so the caller can choose the axis warm-start.
         """
         feasible = [k for k, f in enumerate(self.fitnesses)
                     if f < StellaratorObjective.INVALID_FITNESS]
         if not feasible:
-            return self._init_individual()
-        base = self.pop[random.choice(feasible)]
+            return self._init_individual(), -1
+        base_idx = random.choice(feasible)
+        base = self.pop[base_idx]
         lo = self.cfg._abs_bounds[:, 0]
         hi = self.cfg._abs_bounds[:, 1]
         pert = self.cfg.reinit_perturb_frac * (hi - lo)
         new = base + np.array(
             [random.uniform(-p, p) for p in pert], dtype=np.float64)
-        return np.clip(new, lo, hi)
+        return np.clip(new, lo, hi), base_idx
 
     def _init_population(self):
         self.pop = [self._init_individual() for _ in range(self.cfg.n_pop)]
@@ -1373,18 +1417,27 @@ class DifferentialEvolution:
     # ---- evaluation --------------------------------------------------------
 
     def _evaluate_batch(self, population: list[np.ndarray], gen: int,
-                        indices: list[int] | None = None
+                        indices: list[int] | None = None,
+                        initial_rz_list: list[np.ndarray | None] | None = None
                         ) -> tuple[list[float], list[dict]]:
         """Evaluate a population using the persistent process pool.
 
         `indices` optionally supplies the individual indices to pass to the
         evaluator (used when re-initialising a subset of the population so the
         per-evaluation logs still carry the correct individual number).
+        `initial_rz_list` optionally supplies one axis warm-start guess per
+        evaluated point (the parent's recorded axis for DE trials); the
+        evaluator falls back to the config-level nominal guess.
         """
         if indices is None:
             indices = list(range(len(population)))
         evaluate_func = self.objective.evaluate
-        args = [(ind, gen, i) for i, ind in zip(indices, population)]
+        if initial_rz_list is None:
+            args = [(ind, gen, i) for i, ind in zip(indices, population)]
+        else:
+            args = [(ind, gen, i, irz)
+                    for i, ind, irz in zip(indices, population,
+                                           initial_rz_list)]
         results = self._pool.starmap(evaluate_func, args)
 
         fitnesses, infos = [], []
@@ -1417,7 +1470,8 @@ class DifferentialEvolution:
                 pressed.append(d)
         return pressed
 
-    def _adapt_bounds_if_pressed(self, gen: int) -> bool:
+    def _adapt_bounds_if_pressed(self, gen: int,
+                                 invalid_ratio: float | None = None) -> bool:
         """If the current best presses a box edge, scan along the pressed
         direction(s) in the DE pool and widen the bound to the deepest point
         that still passes the FULL evaluation criterion (identical to the DE
@@ -1433,10 +1487,15 @@ class DifferentialEvolution:
         if not self.cfg.adapt_bounds or self._pool is None:
             return False
 
-        # Do not widen while the population is already drowning in invalid
-        # trials — the new region would only add more failures.
-        invalid_ratio = np.mean(
-            [f >= StellaratorObjective.INVALID_FITNESS for f in self.fitnesses])
+        # Do not widen while the current generation is already drowning in
+        # invalid trials — the new region would only add more failures.
+        # Use the just-evaluated generation's invalid-trial ratio (not the
+        # stored population fitnesses, which mostly hold the last valid parent
+        # and therefore under-report how bad the current box edge is).
+        if invalid_ratio is None:
+            invalid_ratio = np.mean(
+                [f >= StellaratorObjective.INVALID_FITNESS
+                 for f in self.fitnesses])
         if invalid_ratio > self.cfg.adapt_bounds_max_invalid:
             logger.info(
                 "Gen %d: best at bound but invalid=%.0f%% > %.0f%% — "
@@ -1483,9 +1542,11 @@ class DifferentialEvolution:
         points = np.asarray(points)
 
         from functools import partial
+        best_axis = self._axes[best_idx]
         try:
             feasible = np.asarray(
-                self._pool.map(partial(_probe_point_full, self.cfg), points),
+                self._pool.map(partial(_probe_point_full, self.cfg,
+                                       initial_rz=best_axis), points),
                 dtype=bool)
         except Exception as exc:
             logger.warning("Gen %d: bounds probe failed: %s", gen, exc)
