@@ -902,7 +902,8 @@ def explore_feasible_region(
     per-round sample count is doubled automatically: what matters for the
     boundary estimate is the number of points landing INSIDE the feasible
     island (low-discrepancy coverage itself depends on the dimension, not on
-    the box volume).
+    the box volume).  A box with 50-90% feasibility is kept as-is instead of
+    being shrunk back, so the DE can explore the low-density edge region.
 
     Each round's survey runs in parallel over a process pool
     (processes workers, or all available cores by default).
@@ -966,6 +967,14 @@ def explore_feasible_region(
             doubled = True
             print(f"    -> doubling points to {n_cur} for a sharper boundary")
             continue
+        elif rate >= 0.5:
+            # 50-90% feasible: the edge is low-density but far from dead.
+            # Keep the current box and let the DE handle the edge region;
+            # reverting to the previous (smaller) box would hide the very
+            # boundary region where the best solutions often lie.
+            print("    -> keeping current box: feasible in [50%, 90%) — "
+                  "let DE handle the low-density edge")
+            break
         else:
             fracs = prev_fracs  # boundary bracketed: fall back to last good box
             break
@@ -1516,30 +1525,44 @@ class DifferentialEvolution:
 
         lo = self.cfg._abs_bounds[:, 0]
         hi = self.cfg._abs_bounds[:, 1]
-        n = len(best)
         K = self.cfg.adapt_bounds_n_samples
         nominal = self.cfg.initial_bounds[:, 0]
 
-        # 1-D scan per pressed direction: K equally-spaced points from the box
-        # edge outward to edge +- expand x range; all other coils locked at the
-        # current best value.
-        points = []
-        dirs = []          # +1 = outward beyond hi, -1 = outward beyond lo
-        for d in pressed:
+        # Outward direction for each pressed coil: +1 = beyond hi, -1 = beyond lo.
+        dirs = [1 if best[d] >= hi[d] - 1e-12 else -1 for d in pressed]
+
+        if len(pressed) == 1:
+            # Single pressed coil: deterministic 1-D scan from the box edge
+            # outward to edge +- expand x range; other coils locked at best.
+            d = pressed[0]
             span = hi[d] - lo[d]
-            if best[d] >= hi[d] - 1e-12:
+            if dirs[0] > 0:
                 xs = np.linspace(
                     hi[d], hi[d] + self.cfg.adapt_bounds_expand * span, K)
-                dirs.append(1)
             else:
                 xs = np.linspace(
                     lo[d], lo[d] - self.cfg.adapt_bounds_expand * span, K)
-                dirs.append(-1)
-            for x in xs:
-                p = best.copy()
-                p[d] = x
-                points.append(p)
-        points = np.asarray(points)
+            points = np.tile(best, (K, 1)).astype(np.float64, copy=True)
+            points[:, d] = xs
+        else:
+            # Multiple pressed coils: 1-D scans are blind to diagonal feasible
+            # extensions (e.g. coil0 must go up while coil3 goes down
+            # simultaneously).  Sample the outward hyper-rectangle of all
+            # pressed coils with a scrambled Sobol set and widen to the
+            # feasible point deepest in its weakest outward direction.
+            n_samples = max(K, K * len(pressed))
+            from scipy.stats.qmc import Sobol
+            u = Sobol(d=len(pressed), scramble=True,
+                      seed=(self.cfg.seed or 0) + gen).random(n_samples)
+            points = np.tile(best, (n_samples, 1)).astype(np.float64, copy=True)
+            for k, d in enumerate(pressed):
+                span = hi[d] - lo[d]
+                if dirs[k] > 0:
+                    points[:, d] = (hi[d]
+                                    + u[:, k] * self.cfg.adapt_bounds_expand * span)
+                else:
+                    points[:, d] = (lo[d]
+                                    - u[:, k] * self.cfg.adapt_bounds_expand * span)
 
         from functools import partial
         best_axis = self._axes[best_idx]
@@ -1556,28 +1579,54 @@ class DifferentialEvolution:
                         "feasible extension — keeping bounds", gen, pressed)
             return False
 
-        # Widen each pressed bound to the deepest feasible scan point,
-        # clamped so the coil current never changes sign.
+        # Widen the pressed bounds, clamped so the coil current never changes
+        # sign.  For a single pressed coil this is the deepest feasible 1-D
+        # point; for multiple pressed coils it is the feasible Sobol point
+        # deepest in its weakest outward direction (the "diagonal" case).
         changed = False
-        for k, d in enumerate(pressed):
-            seg = feasible[k * K:(k + 1) * K]
-            vals = points[k * K:(k + 1) * K, d]
-            if not seg.any():
-                continue
-            if dirs[k] > 0:
-                new_hi = float(vals[seg].max())
+        if len(pressed) == 1:
+            d = pressed[0]
+            vals = points[:, d]
+            if dirs[0] > 0:
+                new_hi = float(vals[feasible].max())
                 if nominal[d] < 0.0:
                     new_hi = min(new_hi, 0.0)   # never flip sign
                 if new_hi > hi[d]:
                     self.cfg._abs_bounds[d, 1] = new_hi
                     changed = True
             else:
-                new_lo = float(vals[seg].min())
+                new_lo = float(vals[feasible].min())
                 if nominal[d] > 0.0:
                     new_lo = max(new_lo, 0.0)   # never flip sign
                 if new_lo < lo[d]:
                     self.cfg._abs_bounds[d, 0] = new_lo
                     changed = True
+        else:
+            spans = np.array([hi[d] - lo[d] for d in pressed], dtype=np.float64)
+            feasible_points = points[feasible]
+            out = np.empty((len(feasible_points), len(pressed)), dtype=np.float64)
+            for k, d in enumerate(pressed):
+                denom = max(self.cfg.adapt_bounds_expand * spans[k], 1e-12)
+                if dirs[k] > 0:
+                    out[:, k] = (feasible_points[:, d] - hi[d]) / denom
+                else:
+                    out[:, k] = (lo[d] - feasible_points[:, d]) / denom
+            combo_idx = int(np.argmax(np.min(out, axis=1)))
+            combo = feasible_points[combo_idx]
+            for k, d in enumerate(pressed):
+                val = float(combo[d])
+                if dirs[k] > 0:
+                    if nominal[d] < 0.0:
+                        val = min(val, 0.0)     # never flip sign
+                    if val > hi[d]:
+                        self.cfg._abs_bounds[d, 1] = val
+                        changed = True
+                else:
+                    if nominal[d] > 0.0:
+                        val = max(val, 0.0)     # never flip sign
+                    if val < lo[d]:
+                        self.cfg._abs_bounds[d, 0] = val
+                        changed = True
         if changed:
             logger.info("Gen %d: best at bound on coils %s — widened bounds "
                         "after feasibility probe: %s", gen, pressed,
