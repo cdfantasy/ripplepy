@@ -208,6 +208,13 @@ class OptimizationConfig:
     adapt_bounds_margin : float
         A coil is "pressed" if the best value is within this fraction of the
         coil's current range of the box edge (default 0.02 = 2%).
+    reinit_perturb_frac : float
+        When an individual is re-initialised after repeated failures, it is
+        placed near a random FEASIBLE population member by perturbing each
+        coil by this fraction of the current box width (default 0.1 = ±10%).
+        Whole-box random re-initialisation wastes evaluations once the
+        feasible region is a small fraction of the box and collapses the
+        population into clones.
     """
     mgrid_path: str
     nfp: int
@@ -246,6 +253,7 @@ class OptimizationConfig:
     adapt_bounds_max_invalid: float = 0.3
     adapt_bounds_expand: float = 1.5
     adapt_bounds_margin: float = 0.02
+    reinit_perturb_frac: float = 0.1
 
     def __post_init__(self):
         self.output_dir = Path(self.output_dir)
@@ -1026,7 +1034,7 @@ class DifferentialEvolution:
                 if self.invalid_count[i] >= 3 and i != best_idx:
                     # Re-initialise this individual (never the current best —
                     # its trials failing says nothing about its own quality).
-                    new_ind = self._init_individual()
+                    new_ind = self._reinit_individual()
                     new_fit, new_info = self.objective.evaluate(new_ind, gen, i)
                     self.pop[i] = new_ind
                     self.fitnesses[i] = new_fit
@@ -1125,6 +1133,28 @@ class DifferentialEvolution:
                            self.cfg._abs_bounds[i, 1])
             for i in range(self.n_dim)
         ], dtype=np.float64)
+
+    def _reinit_individual(self) -> np.ndarray:
+        """Re-initialise near a random FEASIBLE population member.
+
+        Each coil is perturbed by +- reinit_perturb_frac of the current box
+        width (default 0.1) and clamped back into the box.  Whole-box random
+        re-initialisation wastes evaluations once the feasible region is a
+        small fraction of the box, and re-seeding far from any known-feasible
+        point is what collapses the population into a few clones.  Falls back
+        to whole-box sampling when no feasible member exists yet.
+        """
+        feasible = [k for k, f in enumerate(self.fitnesses)
+                    if f < StellaratorObjective.INVALID_FITNESS]
+        if not feasible:
+            return self._init_individual()
+        base = self.pop[random.choice(feasible)]
+        lo = self.cfg._abs_bounds[:, 0]
+        hi = self.cfg._abs_bounds[:, 1]
+        pert = self.cfg.reinit_perturb_frac * (hi - lo)
+        new = base + np.array(
+            [random.uniform(-p, p) for p in pert], dtype=np.float64)
+        return np.clip(new, lo, hi)
 
     def _init_population(self):
         self.pop = [self._init_individual() for _ in range(self.cfg.n_pop)]
