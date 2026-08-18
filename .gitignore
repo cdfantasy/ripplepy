@@ -42,7 +42,7 @@ tests/h1_optimisation/
 tests/test_file/
 tests/fieldline_cache/
 tests/*.png
-run.log
+*.log
 mgrid*
 log_xgrid*
 extcur*

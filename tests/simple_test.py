@@ -34,6 +34,7 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
+# EXTCUR = [43946.5, 2713.9, 0.0, -2300.6, -87860.5]
 EXTCUR = [43946.5, 2713.9, 0.0, -2300.6, -87860.5]
 INITIAL_RZ = (1.1, 0.0)
 DELTA_R = 0.05           # radial offset of the traced surface from the axis
