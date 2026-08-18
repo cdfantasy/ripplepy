@@ -12,7 +12,7 @@ from ripplepy import (
     compute_epstot, find_axis,
 )
 
-def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, nfp,
+def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
                   sur_idx, nturn, nphi, npart, full_torus=False,py_old = False):
     print(f"\n{'='*60}")
     print(f"  {name}")
@@ -20,7 +20,15 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
     
     vmec = Vmec(str(vmec_path))
     R0_vmec = float(vmec.wout.Rmajor_p)
-    
+    # Magnetic-axis guess from the VMEC axis Fourier coefficients:
+    # at phi=0, R = sum(raxis_cc) + sum(raxis_cs); Z = 0 (symmetry plane).
+    # Not every wout carries raxis_cs — treat it as zero when absent.
+    initial_rz = np.array([
+        float(sum(vmec.wout.raxis_cc))
+        + float(sum(getattr(vmec.wout, "raxis_cs", [0.0]))),
+        0.0,
+    ])
+
     # RZ start points
     RZ_points = []
     for s in sur_idx:
@@ -39,7 +47,7 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
         print("  Loaded Boozer from cached boozmn netcdf.")
     except Exception:
         boozer.register(sur_idx); boozer.run()
-        boozer.bx.write_boozmn(str(boozer_path))
+        # boozer.bx.write_boozmn(str(boozer_path))
         print("  Computed Boozer transform and cached to boozmn netcdf.")
 
     neoclass = neo.from_simsopt_boozer(boozer)
@@ -137,17 +145,18 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, initial_rz, extcur, n
 BASE = str(Path(__file__).resolve().parent.parent)
 
 # ═══════════════════════════════════════════════════════════════
-# NCSX
+# w7x
 # ═══════════════════════════════════════════════════════════════
-# run_benchmark(
-#     "NCSX",
-#     f"{BASE}/tests/test_file/wout_ncsx_c09r00_free.nc",
-#     f"{BASE}/tests/test_file/mgrid_c09r00.nc",
-#     (1.57, 0), None, 3,
-#     np.linspace(0.1, 0.2, 11),
-#     nturn=200, nphi=180, npart=50,
-#     full_torus=False,
-# )
+run_benchmark(
+    "w7x",
+    f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
+    f"{BASE}/tests/test_file/w7x_boozmn.nc",
+    f"{BASE}/tests/test_file/mgrid_w7-x.nc",
+    None, 5,
+    np.linspace(0.1, 0.2, 11),
+    nturn=200, nphi=180, npart=50,
+    full_torus=False,
+)
 
 # ═══════════════════════════════════════════════════════════════
 # CFQS
@@ -159,7 +168,7 @@ BASE = str(Path(__file__).resolve().parent.parent)
 #     f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
 #     f"{BASE}/tests/test_file/cfqs_boozmn.nc",
 #     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
-#     (1.21, 0), None, 2,
+#     None, 2,
 #     np.linspace(0.1, 1, 11),
 #     nturn=100, nphi=100, npart=500,
 #     full_torus=False,
@@ -168,13 +177,13 @@ BASE = str(Path(__file__).resolve().parent.parent)
 # ═══════════════════════════════════════════════════════════════
 # H1
 # ═══════════════════════════════════════════════════════════════
-run_benchmark(
-    "H1",
-    f"{BASE}/tests/test_file/wout_h1_design.nc",
-    f"{BASE}/tests/test_file/h1_boozmn.nc",
-    f"{BASE}/tests/test_file/mgrid_h1_design.nc",
-    (1.26, 0), [50000, 5000, 0, -80000, -40000], 3,
-    np.linspace(0.1, 1, 11),
-    nturn=200, nphi=360, npart=5000,
-    full_torus=False,
-)
+# run_benchmark(
+#     "H1",
+#     f"{BASE}/tests/test_file/wout_h1_design.nc",
+#     f"{BASE}/tests/test_file/h1_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
+#     [50000, 5000, 0, -80000, -40000], 3,
+#     np.linspace(0.1, 1, 11),
+#     nturn=200, nphi=360, npart=5000,
+#     full_torus=False,
+# )
