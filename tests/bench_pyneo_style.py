@@ -171,32 +171,32 @@ BASE = str(Path(__file__).resolve().parent.parent)
 # ═══════════════════════════════════════════════════════════════
 
 
-# run_benchmark(
-#     "w7x",
-#     f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
-#     f"{BASE}/tests/test_file/w7x_boozmn.nc",
-#     f"{BASE}/tests/test_file/mgrid_w7-x.nc",
-#     None, 5,
-#     np.linspace(0.1, 1, 11),
-#     nturn=400, nphi=360, npart=5000,
-#     full_torus=False,
-# )
+run_benchmark(
+    "w7x",
+    f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
+    f"{BASE}/tests/test_file/w7x_boozmn.nc",
+    f"{BASE}/tests/test_file/mgrid_w7-x.nc",
+    None, 5,
+    np.linspace(0.1, 1, 11),
+    nturn=400, nphi=360, npart=5000,
+    full_torus=False,
+)
 
 # ═══════════════════════════════════════════════════════════════
 # CFQS
 # ═══════════════════════════════════════════════════════════════
 
 
-run_benchmark(
-    "CFQS",
-    f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
-    f"{BASE}/tests/test_file/cfqs_boozmn.nc",
-    f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
-    None, 2,
-    np.linspace(0.1, 1, 11),
-    nturn=400, nphi=360, npart=5000,
-    full_torus=False,
-)
+# run_benchmark(
+#     "CFQS",
+#     f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc",
+#     f"{BASE}/tests/test_file/cfqs_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_2b40R1mB01.nc",
+#     None, 2,
+#     np.linspace(0.1, 1, 11),
+#     nturn=400, nphi=360, npart=5000,
+#     full_torus=False,
+# )
 
 # ═══════════════════════════════════════════════════════════════
 # H1

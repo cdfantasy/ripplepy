@@ -12,7 +12,7 @@ Chain:
 
 Simply run it.
 """
-
+# nohup python -u h1_optimise.py > run4.log 2>&1 &
 from __future__ import annotations
 
 import logging
@@ -35,7 +35,7 @@ NOMINAL_EXTCUR = np.array([50000.0, 5000.0, 3000.0, -80000.0, -40000.0])
 INITIAL_RZ = np.array([1.26, 0.0], dtype=np.float64)
 NFP = 3
 FULL_TORUS = False
-DELT_R = 0.05
+DELT_R = 0.1
 
 # 1-D nominal currents -> automatic bounds (see OptimizationConfig)
 BOUNDS_FRACTION = 0.2
@@ -45,6 +45,7 @@ EXPLORE = True                # set False to skip and use BOUNDS_FRACTION direct
 SURVEY_N_SAMPLES = 256
 EXPLORE_MAX_ROUNDS = 5
 EXPLORE_EXPAND = 1.5
+EXPLORE_CRITERION = "short_trace"  # "axis" | "short_trace" | "full"
 
 # Differential Evolution (JADE) settings
 N_POP = 40
@@ -139,10 +140,12 @@ def main():
     )
 
     if EXPLORE:
-        print("\n=== [explore] adaptive feasible-region survey (Sobol + find_axis) ===")
+        print("\n=== [explore] adaptive feasible-region survey "
+              f"(Sobol + {EXPLORE_CRITERION}) ===")
         res = explore_feasible_region(
             config, n_samples=SURVEY_N_SAMPLES, seed=0,
             expand_factor=EXPLORE_EXPAND, max_rounds=EXPLORE_MAX_ROUNDS,
+            criterion=EXPLORE_CRITERION,
         )
         search_bounds = res["extent_bounds"]
         print("  -> using extent_bounds (explored feasible region) for the DE run")

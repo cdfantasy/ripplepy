@@ -28,15 +28,17 @@ BASE = str(Path(__file__).resolve().parent.parent)
 # Configuration
 # ═══════════════════════════════════════════════
 
-DEVICE = "CFQS"
-VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
+# DEVICE = "CFQS"
+# VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
 
 # DEVICE = "H1"
 # VMEC_PATH = f"{BASE}/tests/test_file/wout_h1_design.nc"
 
+DEVICE = "w7x"
+VMEC_PATH = f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc"
 
 SURF_IDX_LIST = np.linspace(0.1, 1.0, 10)
-NTURN = 100
+NTURN = 400
 NSTEP_PER = 50    # pyneo: RK4 steps per field period (matches ctx transport options)
 NPHI =200        # baseline grid pts per turn; f90 uses NPHI_F90 below
 NPART = 500

@@ -36,6 +36,7 @@ from .ripple import (
     set_extcur,
     compute_initial_gradpsi_nemov,
     set_trace_parameters,
+    trace_fieldline,
 )
 
 # ---------------------------------------------------------------------------
@@ -575,12 +576,19 @@ def _n_workers(processes: int | None) -> int:
 
 
 _survey_cfg: OptimizationConfig | None = None
+_survey_criterion: str = "axis"
+_survey_short_nturn: int = 20
+_survey_short_nphi: int = 72
 
 
-def _survey_worker_init(config: OptimizationConfig):
+def _survey_worker_init(config: OptimizationConfig, criterion: str = "axis",
+                        short_nturn: int = 20, short_nphi: int = 72):
     """Initialise the survey worker (field once; needed for spawn platforms)."""
-    global _survey_cfg
+    global _survey_cfg, _survey_criterion, _survey_short_nturn, _survey_short_nphi
     _survey_cfg = config
+    _survey_criterion = criterion
+    _survey_short_nturn = int(short_nturn)
+    _survey_short_nphi = int(short_nphi)
     global _mgrid_initialized
     if not _mgrid_initialized:
         with _silent():
@@ -594,13 +602,19 @@ def _survey_worker_init(config: OptimizationConfig):
 
 
 def _survey_point(point) -> bool:
-    """Feasibility of one coil-current vector.
+    """Feasibility of one coil-current vector under the configured criterion.
 
-    Feasible iff a magnetic axis is found AND it lies on the Z=0 symmetry
-    plane (|Z_axis| <= axis_z_tol) — an off-plane axis means the configuration
-    is degenerate rather than a valid symmetric stellarator.
+    axis        : magnetic axis found AND on the Z=0 symmetry plane.
+    short_trace : axis criterion + a short field-line trace from axis+delt_r.
+    full        : the complete DE evaluation chain (find_axis + Z-symmetry +
+                  full nturn trace + epsilon_eff checks).
     """
     cfg = _survey_cfg
+    if _survey_criterion == "full":
+        return _probe_point_full(cfg, point)
+    if _survey_criterion == "short_trace":
+        return _probe_point_short_trace(cfg, point,
+                                        _survey_short_nturn, _survey_short_nphi)
     try:
         with _silent():
             set_extcur(np.asarray(point, dtype=np.float64))
@@ -637,6 +651,45 @@ def _probe_point_full(cfg, point) -> bool:
         return False
 
 
+def _probe_point_short_trace(cfg, point, nturn: int = 20, nphi: int = 72
+                             ) -> bool:
+    """Cheap feasibility probe: find_axis + Z-symmetry + short trace.
+
+    Traces only `nturn` x `nphi` points from axis+delt_r (instead of the full
+    DE-resolution trace), which catches the dominant failure mode — the surface
+    at the required DELT_R is missing / stochastic / escaping — at a fraction
+    of the full evaluate cost.  Not identical to the DE criterion, but far
+    tighter than axis-only.
+    """
+    try:
+        with _silent():
+            set_extcur(np.asarray(point, dtype=np.float64))
+            axis_result = find_axis(
+                cfg.initial_rz, xtol=1e-5, max_iter=100,
+                delta_r=0.01, verbose=False,
+            )
+        axis_rz, _, _, success = axis_result
+        if not success:
+            return False
+        if abs(axis_rz[1]) > cfg.axis_z_tol:
+            return False
+        with _silent():
+            start_rz = np.array([axis_rz[0] + cfg.delt_r, axis_rz[1]],
+                                dtype=np.float64, order="F")
+            # Match the full DE chain: use the same non-zero initial grad-psi
+            # (with zero grad-psi the v(3:5) equations stay identically zero,
+            # which can make the short probe less strict than the DE ODE).
+            gradpsi = compute_initial_gradpsi_nemov(
+                np.asarray(point, dtype=np.float64),
+                start_rz[0], start_rz[1], verbose=False)
+            _, trace_istate = trace_fieldline(
+                initial_rz=start_rz, initial_gradpsi=gradpsi,
+                nturn=nturn, nphi=nphi, verbose=False)
+        return trace_istate == 0
+    except Exception:
+        return False
+
+
 def survey_feasibility(
     config: OptimizationConfig,
     n_samples: int = 256,
@@ -644,19 +697,27 @@ def survey_feasibility(
     expand_factor: float = 1.5,
     frac_max: float = 1.0,
     processes: int | None = None,
+    criterion: str = "short_trace",
+    short_nturn: int = 20,
+    short_nphi: int = 72,
 ) -> dict:
     """Coarse sweep of the current search box to map feasible regions.
 
-    A point is marked FEASIBLE if a magnetic axis can be found for its coil
-    currents — finding the axis means the field closes and a configuration can
-    form, so the expensive epsilon_eff evaluation is intentionally skipped
-    (which makes the sweep an order of magnitude cheaper).  Returns overall
-    feasibility, per-coil statistics, a suggested tighter bounding box, and an
-    ADAPTED set of initial_bounds (see below); the raw survey is written to
-    <output_dir>/survey_points.csv.
+    A point is marked FEASIBLE according to `criterion`:
+      - "axis"        : find_axis succeeds and the axis lies on Z=0 (fast,
+                         but overestimates the box usable by the full DE chain);
+      - "short_trace" : axis criterion + a short trace from axis+delt_r
+                         (default; catches most collapsed/stochastic surfaces);
+      - "full"        : the complete DE evaluation chain (find_axis +
+                         Z-symmetry + full-resolution trace + epsilon checks).
+                         Identical to the DE criterion, but expensive.
 
-    The per-point find_axis checks run IN PARALLEL over a process pool
-    (processes workers, or all available cores by default).
+    Returns overall feasibility, per-coil statistics, a suggested tighter
+    bounding box, and an ADAPTED set of initial_bounds (see below); the raw
+    survey is written to <output_dir>/survey_points.csv.
+
+    The per-point checks run IN PARALLEL over a process pool (processes
+    workers, or all available cores by default).
 
     Adaptive-bounds policy (feed adjusted_bounds back as initial_bounds):
       - feasible fraction >= 0.9  → the box is mostly valid, so WIDEN it by
@@ -666,6 +727,11 @@ def survey_feasibility(
       - otherwise                 → keep the current fractions.
     """
     from scipy.stats.qmc import Sobol
+
+    if criterion not in ("axis", "short_trace", "full"):
+        raise ValueError(
+            f"Unknown feasibility criterion '{criterion}' — expected "
+            "'axis', 'short_trace' or 'full'")
 
     # One-time field initialisation (same machinery as StellaratorObjective).
     global _mgrid_initialized
@@ -686,10 +752,10 @@ def survey_feasibility(
     u = Sobol(d=n_dim, scramble=True, seed=seed).random(n_samples)
     points = lo + u * (hi - lo)
 
-    # Parallel feasibility check: one task per point (axis found => feasible).
+    # Parallel feasibility check: one task per point.
     n_workers = _n_workers(processes)
     with Pool(processes=n_workers, initializer=_survey_worker_init,
-              initargs=(config,)) as pool:
+              initargs=(config, criterion, short_nturn, short_nphi)) as pool:
         feasible = np.asarray(pool.map(_survey_point, points), dtype=bool)
 
     n_feasible = int(feasible.sum())
@@ -754,8 +820,11 @@ def survey_feasibility(
         action = "KEEP current fractions"
     adjusted_bounds = np.column_stack([nominal_vals, new_fracs])
 
+    criterion_label = {"axis": "axis found",
+                      "short_trace": "axis + short trace",
+                      "full": "full DE chain"}[criterion]
     print(f"\n=== Feasibility survey ({n_samples} Sobol points) ===")
-    print(f"  feasible (axis found): {n_feasible}/{n_samples} "
+    print(f"  feasible ({criterion_label}): {n_feasible}/{n_samples} "
           f"({feasible_rate * 100:.1f}%)")
     for d in range(n_dim):
         print(f"  coil {d}: original [{lo[d]:10.1f}, {hi[d]:10.1f}]  "
@@ -786,16 +855,22 @@ def explore_feasible_region(
     frac_max: float = 1.0,
     processes: int | None = None,
     max_rounds: int = 6,
+    criterion: str = "short_trace",
+    short_nturn: int = 20,
+    short_nphi: int = 72,
 ) -> dict:
-    """Adaptively explore the feasible-region extent with Sobol + find_axis.
+    """Adaptively explore the feasible-region extent with Sobol + probe.
 
     Surveys the search box, widens it while it stays almost fully feasible
     (>= 90%), and falls back to the last fully-feasible box once feasibility
-    drops — bracketing the boundary of the valid (axis-forming) region.  When
-    the feasible fraction becomes small, the per-round sample count is doubled
-    automatically: what matters for the boundary estimate is the number of
-    points landing INSIDE the feasible island (low-discrepancy coverage itself
-    depends on the dimension, not on the box volume).
+    drops — bracketing the boundary of the region that passes `criterion`
+    (default "short_trace": axis + a short trace from axis+delt_r, so the
+    DE is not handed a box full of points that only pass find_axis but then
+    fail the real trace).  When the feasible fraction becomes small, the
+    per-round sample count is doubled automatically: what matters for the
+    boundary estimate is the number of points landing INSIDE the feasible
+    island (low-discrepancy coverage itself depends on the dimension, not on
+    the box volume).
 
     Each round's survey runs in parallel over a process pool
     (processes workers, or all available cores by default).
@@ -836,7 +911,9 @@ def explore_feasible_region(
             processes=n_workers,
             output_dir=config.output_dir,
         )
-        res = survey_feasibility(sub, n_samples=n_cur, seed=seed + rnd)
+        res = survey_feasibility(sub, n_samples=n_cur, seed=seed + rnd,
+                                 criterion=criterion, short_nturn=short_nturn,
+                                 short_nphi=short_nphi)
         rate = float(res["feasible_fraction"])
         # core = feasible-island of the last fully-feasible (>= 90%) round,
         # so that core_bounds always lies INSIDE extent_bounds.
@@ -1021,6 +1098,8 @@ class DifferentialEvolution:
             # 3. Selection (elitism: the current best is never re-initialised)
             invalid_solutions = 0
             accepted: list[int] = []
+            reinit_indices: list[int] = []
+            reinit_individuals: list[np.ndarray] = []
             best_idx = int(np.argmin(self.fitnesses))
             for i in range(self.cfg.n_pop):
                 tf = trial_fitnesses[i]
@@ -1034,17 +1113,9 @@ class DifferentialEvolution:
                 if self.invalid_count[i] >= 3 and i != best_idx:
                     # Re-initialise this individual (never the current best —
                     # its trials failing says nothing about its own quality).
-                    new_ind = self._reinit_individual()
-                    new_fit, new_info = self.objective.evaluate(new_ind, gen, i)
-                    self.pop[i] = new_ind
-                    self.fitnesses[i] = new_fit
-                    self.all_infos.append(new_info)
-                    self._axes[i] = new_info.get("axis_rz")
-                    self.invalid_count[i] = 0
-                    logger.info(
-                        "Gen %d, Ind %d: re-initialised (fitness=%.6e)",
-                        gen, i, new_fit,
-                    )
+                    # Collected here and evaluated as one parallel batch below.
+                    reinit_indices.append(i)
+                    reinit_individuals.append(self._reinit_individual())
                 elif self.invalid_count[i] >= 3:
                     # Protected best: keep it, reset its failure counter.
                     self.invalid_count[i] = 0
@@ -1060,6 +1131,25 @@ class DifferentialEvolution:
 
                 if tf >= StellaratorObjective.INVALID_FITNESS:
                     invalid_solutions += 1
+
+            # 3b. Evaluate all re-initialised individuals in one pool batch
+            # (previously each re-init ran serially in the main process, which
+            # made high-invalid generations take minutes).
+            if reinit_indices:
+                reinit_fits, reinit_infos = self._evaluate_batch(
+                    reinit_individuals, gen, indices=reinit_indices)
+                for i, new_ind, new_fit, new_info in zip(
+                        reinit_indices, reinit_individuals,
+                        reinit_fits, reinit_infos):
+                    self.pop[i] = new_ind
+                    self.fitnesses[i] = new_fit
+                    self.all_infos.append(new_info)
+                    self._axes[i] = new_info.get("axis_rz")
+                    self.invalid_count[i] = 0
+                    logger.info(
+                        "Gen %d, Ind %d: re-initialised (fitness=%.6e)",
+                        gen, i, new_fit,
+                    )
 
             # JADE: adapt mu_F / mu_CR from the successful trials.
             if self.cfg.strategy == "jade":
@@ -1282,11 +1372,19 @@ class DifferentialEvolution:
 
     # ---- evaluation --------------------------------------------------------
 
-    def _evaluate_batch(self, population: list[np.ndarray], gen: int
+    def _evaluate_batch(self, population: list[np.ndarray], gen: int,
+                        indices: list[int] | None = None
                         ) -> tuple[list[float], list[dict]]:
-        """Evaluate a population using the persistent process pool."""
+        """Evaluate a population using the persistent process pool.
+
+        `indices` optionally supplies the individual indices to pass to the
+        evaluator (used when re-initialising a subset of the population so the
+        per-evaluation logs still carry the correct individual number).
+        """
+        if indices is None:
+            indices = list(range(len(population)))
         evaluate_func = self.objective.evaluate
-        args = [(ind, gen, i) for i, ind in enumerate(population)]
+        args = [(ind, gen, i) for i, ind in zip(indices, population)]
         results = self._pool.starmap(evaluate_func, args)
 
         fitnesses, infos = [], []
