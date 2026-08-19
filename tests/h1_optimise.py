@@ -12,7 +12,7 @@ Chain:
 
 Simply run it.
 """
-# nohup python -u h1_optimise.py > run4.log 2>&1 &
+# nohup python -u h1_optimise.py > /dev/null 2>&1 &
 from __future__ import annotations
 
 import logging
@@ -36,7 +36,7 @@ NOMINAL_EXTCUR = np.array([50000.0, 5000.0, 3000.0, -80000.0, -40000.0])
 INITIAL_RZ = np.array([1.26, 0.0], dtype=np.float64)
 NFP = 3
 FULL_TORUS = False
-DELT_R = 0.1
+DELT_R = 0.05
 
 # 1-D nominal currents -> automatic bounds (see OptimizationConfig)
 BOUNDS_FRACTION = 0.2
@@ -45,18 +45,18 @@ BOUNDS_FRACTION = 0.2
 # For H1 it is usually a good idea to fix the TF coil (typically the one that
 # mainly sets the average toroidal field) so epsilon_eff improvements are
 # geometric rather than an overall field-strength drift.  Empty = all coils free.
-FIXED_COILS = []   # e.g. [0] to fix coil 0 (confirm which index is TF first)
+FIXED_COILS = [0]   # e.g. [0] to fix coil 0 (confirm which index is TF first)
 
 # Adaptive feasible-region exploration
 EXPLORE = True                # set False to skip and use BOUNDS_FRACTION directly
 SURVEY_N_SAMPLES = 256
 EXPLORE_MAX_ROUNDS = 5
-EXPLORE_EXPAND = 1.25
-EXPLORE_CRITERION = "full"  # "axis" | "short_trace" | "full"
+EXPLORE_EXPAND = 1.35
+EXPLORE_CRITERION = "axis"  # "axis" | "short_trace" | "full"
 
 # Differential Evolution (JADE) settings
 N_POP = 64
-MAX_GEN = 50
+MAX_GEN = 100
 FTOL = 1e-8
 PATIENCE = 15
 SEED = 42
