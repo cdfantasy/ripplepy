@@ -425,7 +425,7 @@ class StellaratorObjective:
             info["failure_type"] = FailureType.AXIS_NOT_FOUND.value
             info["failure_message"] = "Magnetic axis not found"
             if not quiet:
-                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                logger.warning("Gen %s, Ind %s: %s", gen, ind_idx,
                                info["failure_message"])
             return self.INVALID_FITNESS, info
         if abs(axis_rz[1]) > self.cfg.axis_z_tol:
@@ -436,7 +436,7 @@ class StellaratorObjective:
             info["failure_message"] = (f"Magnetic axis off symmetry plane "
                                        f"(Z={axis_rz[1]:.4f} > tol={self.cfg.axis_z_tol})")
             if not quiet:
-                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                logger.warning("Gen %s, Ind %s: %s", gen, ind_idx,
                                info["failure_message"])
             return self.INVALID_FITNESS, info
         info["axis_rz"] = np.asarray(axis_rz, dtype=np.float64)
@@ -461,7 +461,7 @@ class StellaratorObjective:
             info["failure_type"] = FailureType.TRACING_FAILED.value
             info["failure_message"] = f"Field-line tracing failed (istate={trace_istate})"
             if not quiet:
-                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                logger.warning("Gen %s, Ind %s: %s", gen, ind_idx,
                                info["failure_message"])
             return self.INVALID_FITNESS, info
 
@@ -469,7 +469,7 @@ class StellaratorObjective:
             info["failure_type"] = FailureType.EPSILON_NAN.value
             info["failure_message"] = f"epsilon_eff is {epsilon_eff}"
             if not quiet:
-                logger.warning("Gen %d, Ind %d: %s", gen, ind_idx,
+                logger.warning("Gen %s, Ind %s: %s", gen, ind_idx,
                                info["failure_message"])
             return self.INVALID_FITNESS, info
 
@@ -494,7 +494,7 @@ class StellaratorObjective:
                 return self.INVALID_FITNESS, info
             Aspect_ratio = R0 / minor_radius
         except Exception as exc:
-            logger.warning("Gen %d, Ind %d: plasma param calc failed: %s", gen, ind_idx, exc)
+            logger.warning("Gen %s, Ind %s: plasma param calc failed: %s", gen, ind_idx, exc)
             vol, minor_radius, iota = np.nan, np.nan, np.nan
         
         if not quiet:

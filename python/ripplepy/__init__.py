@@ -12,8 +12,10 @@ except ImportError:
 from .mgrid import MGrid
 from .ripple import (
     compute_epstot,
+    fieldline_smoothness_poincare,
     compute_initial_gradpsi_nemov,
     find_axis,
+    find_axis_multi_guess,
     get_bfield_matrix,
     initialize_mgrid_field,
     plot_fieldline_3d,
@@ -35,6 +37,7 @@ __version__ = "0.1.0"
 __all__ = [
     "MGrid",
     "compute_epstot",
+    "fieldline_smoothness_poincare",
     "initialize_mgrid_field",
     "set_extcur",
     "get_bfield_matrix",
@@ -42,6 +45,7 @@ __all__ = [
     "plot_fieldline_3d",
     "compute_initial_gradpsi_nemov",
     "find_axis",
+    "find_axis_multi_guess",
     "set_trace_parameters",
     "calculate_plasma_params",
     "OptimizationConfig",

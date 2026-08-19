@@ -100,7 +100,163 @@ def set_trace_parameters(nturn, nphi, npart=5000, verbose=True):
         print(f"✓ Trace parameters set: nturn={nturn}, nphi={nphi}{part_str}")
 
 
-def trace_fieldline(initial_rz=None, initial_gradpsi=None, nturn=400, nphi=360, extcur=None, verbose=False):
+def fieldline_smoothness_flag(fieldline_data, nturn, nphi,
+                               drift_r_frac=0.02, drift_z_abs=0.02,
+                               max_step=0.10):
+    """Fast smoothness / confinement check for a traced field line.
+
+    This is intentionally a cheap O(npoints) numpy pass — orders of
+    magnitude faster than `trace_gradpsi_internal` itself — and is meant to
+    be used as a first-pass oracle for island mapping.  It does not attempt a
+    full Poincare analysis; it only rejects lines that are clearly not
+    confined to a smooth surface:
+
+      * non-finite or zero-filled data
+      * an unphysically large single-step jump in (R, Z)
+      * monotonic/random drift of the per-turn mean R
+      * per-turn mean Z drifting off the Z=0 symmetry plane
+
+    Returns True when the line looks like a regular confined field line.
+    Thresholds are deliberately loose; ambiguous lines pass this check and
+    can be re-tested with a higher-level criterion later.
+    """
+    if fieldline_data is None or fieldline_data.size == 0:
+        return False
+    R = np.asarray(fieldline_data[:, 0], dtype=np.float64)
+    Z = np.asarray(fieldline_data[:, 1], dtype=np.float64)
+    n = int(nturn) * int(nphi)
+    if R.size < n or Z.size < n:
+        return False
+    if not (np.isfinite(R).all() and np.isfinite(Z).all()):
+        return False
+    if np.all(R == 0.0) and np.all(Z == 0.0):
+        return False
+
+    # 1) Single-step jump: a field line is integrated with small steps, so a
+    #    jump of several cm between consecutive points indicates escape or
+    #    an interpolation discontinuity.
+    if R.size > 1:
+        dR = np.abs(np.diff(R))
+        dZ = np.abs(np.diff(Z))
+        if float(dR.max()) > float(max_step) or float(dZ.max()) > float(max_step):
+            return False
+
+    # 2) Per-turn mean R drift: on a smooth flux surface the turn-averaged
+    #    R is stationary; a stochastic/escaping line wanders.
+    n_turns = R.size // int(nphi)
+    if n_turns >= 3:
+        turn_R = R[:n_turns * int(nphi)].reshape(n_turns, int(nphi))
+        turn_Z = Z[:n_turns * int(nphi)].reshape(n_turns, int(nphi))
+        mean_R = turn_R.mean(axis=1)
+        mean_Z = turn_Z.mean(axis=1)
+        r0 = float(np.mean(mean_R))
+        drift_r = float(np.max(mean_R) - np.min(mean_R))
+        if drift_r > max(drift_r_frac * max(r0, 1e-12), 0.005):
+            return False
+        if float(np.max(np.abs(mean_Z))) > float(drift_z_abs):
+            return False
+
+    return True
+
+
+def fieldline_smoothness_poincare(fieldline_data, nturn, nphi,
+                                   axis_rz=None, n_harmonics=4,
+                                   residual_rms_frac_tol=0.05,
+                                   max_angular_gap=1.0,
+                                   min_points=16):
+    """Judge smoothness from the phi=0 Poincare section of a traced line.
+
+    A regular magnetic surface gives a set of (R, Z) Poincare points that lie
+    on a smooth closed curve; a stochastic/escaping line gives an annular
+    cloud, and a low-order rational surface gives only a few distinct points.
+
+    The check therefore:
+      1. takes every nphi-th point (phi = 0 section);
+      2. forms polar coordinates (theta, r) around the magnetic axis (or the
+         Poincare centroid when axis_rz is not supplied);
+      3. fits r(theta) with a low-order Fourier series (k=0..n_harmonics);
+      4. rejects when the normalised fit residual is too large, or when the
+         points leave a large angular gap (island chain / too few crossings).
+
+    This is O(n_turn) and effectively free compared with the field-line
+    integration itself.
+
+    Returns
+    -------
+    smooth : bool
+    metrics : dict
+        {n_points, residual_rms_frac, max_gap_rad}
+    """
+    npoints = int(nturn) * int(nphi)
+    if fieldline_data is None or fieldline_data.ndim < 2:
+        return False, {"n_points": 0}
+    if fieldline_data.shape[0] < npoints:
+        return False, {"n_points": 0}
+
+    idx = np.arange(0, npoints, int(nphi), dtype=int)
+    R = np.asarray(fieldline_data[idx, 0], dtype=np.float64)
+    Z = np.asarray(fieldline_data[idx, 1], dtype=np.float64)
+
+    metrics = {"n_points": int(R.size)}
+    if R.size < int(min_points):
+        return False, metrics
+    if not (np.isfinite(R).all() and np.isfinite(Z).all()):
+        return False, metrics
+    if np.all(R == 0.0) and np.all(Z == 0.0):
+        return False, metrics
+
+    if axis_rz is not None:
+        R0 = float(axis_rz[0])
+        Z0 = float(axis_rz[1])
+    else:
+        R0 = float(np.median(R))
+        Z0 = float(np.median(Z))
+
+    theta = np.arctan2(Z - Z0, R - R0)
+    r = np.hypot(R - R0, Z - Z0)
+
+    order = np.argsort(theta)
+    theta_s = theta[order]
+    r_s = r[order]
+
+    # FFT low-pass fit of r(theta): interpolate the (sorted but non-uniform)
+    # Poincare points onto a uniform grid, then keep harmonics 0..n_harmonics.
+    # This is O(n log n) and avoids LAPACK; for n_turn ~ 200 it is negligible.
+    n_uni = 2 ** int(np.ceil(np.log2(max(64, len(theta_s)))))
+    theta_grid = np.linspace(-np.pi, np.pi, n_uni, endpoint=False)
+    r_grid = np.interp(theta_grid, theta_s, r_s, period=2.0 * np.pi)
+
+    spec = np.fft.rfft(r_grid)
+    n_keep = int(n_harmonics)
+    spec_filtered = spec.copy()
+    if n_keep + 1 < len(spec_filtered):
+        spec_filtered[n_keep + 1:] = 0.0
+    r_fit = np.fft.irfft(spec_filtered, n=n_uni)
+
+    residual = r_grid - r_fit
+    rms_frac = float(np.sqrt(np.mean(residual**2))
+                     / max(float(np.mean(r_grid)), 1e-12))
+    metrics["residual_rms_frac"] = rms_frac
+
+    # Angular coverage, including the wrap-around gap.
+    gaps = np.diff(theta_s)
+    max_gap = 0.0 if gaps.size == 0 else float(np.max(gaps))
+    wrap_gap = float(2.0 * np.pi - (theta_s[-1] - theta_s[0]))
+    max_gap = max(max_gap, wrap_gap)
+    metrics["max_gap_rad"] = max_gap
+
+    smooth = (rms_frac <= float(residual_rms_frac_tol)
+              and max_gap <= float(max_angular_gap))
+    return bool(smooth), metrics
+
+
+def trace_fieldline(initial_rz=None, initial_gradpsi=None, nturn=400, nphi=360, extcur=None, verbose=False,
+                    check_smoothness=False,
+                    smoothness_axis_rz=None,
+                    smoothness_n_harmonics=4,
+                    smoothness_residual_rms_frac_tol=0.05,
+                    smoothness_max_angular_gap=1.0,
+                    smoothness_min_points=16):
     if Effective_Ripple is None:
         raise ImportError("Effective_Ripple was not imported successfully.")
     initial_rz = np.asarray(initial_rz, dtype=np.float64)
@@ -122,6 +278,18 @@ def trace_fieldline(initial_rz=None, initial_gradpsi=None, nturn=400, nphi=360, 
     trace_istate = Effective_Ripple.trace_gradpsi_internal(fieldline_data, initial_rz_f, initial_gradpsi_f)
     if trace_istate != 0 and verbose:
         print(f"✗ Field line tracing failed with istate={trace_istate}")
+    if check_smoothness and trace_istate == 0:
+        smooth, _ = fieldline_smoothness_poincare(
+            fieldline_data, nturn, nphi,
+            axis_rz=smoothness_axis_rz,
+            n_harmonics=smoothness_n_harmonics,
+            residual_rms_frac_tol=smoothness_residual_rms_frac_tol,
+            max_angular_gap=smoothness_max_angular_gap,
+            min_points=smoothness_min_points)
+        if not smooth:
+            trace_istate = -2001   # traced, but not a smooth confined field line
+            if verbose:
+                print("✗ Field line tracing succeeded but Poincare smoothness check failed")
     return fieldline_data, trace_istate
 
 
@@ -220,34 +388,112 @@ def compute_initial_gradpsi_nemov(extcur, R0, Z0, phi0=0.0, verbose=True):
     return np.array([n_R, n_Z, R0**2 * n_phi], dtype=np.float64)
 
 
-def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, verbose=False):
+def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
+              verbose=False):
+    """Find the magnetic axis by solving the one-turn return-map fixed point.
+
+    Robustness improvements over a bare `root` call:
+      * 5 trial points (nominal, +-delta_r in R, +-delta_r in Z) are ranked
+        by their one-turn return residual before starting the solver;
+      * if the best trial fails, the next-best trial is attempted (up to 3);
+      * the final axis is re-traced and accepted only if it actually closes
+        on itself to within a tolerance consistent with `xtol`.
+    """
     from scipy.optimize import root
+    nphi = int(nphi)
+    n_one_turn = nphi   # index of the point after exactly one toroidal turn
     if verbose:
-        print(f"\nSearching for magnetic axis...")
+        print("\nSearching for magnetic axis...")
+
     def axis_residual(candidate_rz):
         candidate_rz = np.array(candidate_rz, dtype=np.float64, order='F')
-        fld, ist = trace_fieldline(initial_rz=candidate_rz, initial_gradpsi=None, nturn=2, nphi=360, verbose=False)
+        fld, ist = trace_fieldline(
+            initial_rz=candidate_rz, initial_gradpsi=None,
+            nturn=2, nphi=nphi, verbose=False)
         if ist != 0:
             return np.array([1e10, 1e10])
-        return np.array([fld[360, 0] - candidate_rz[0], fld[360, 1] - candidate_rz[1]])
+        return np.array([fld[n_one_turn, 0] - candidate_rz[0],
+                         fld[n_one_turn, 1] - candidate_rz[1]])
+
+    init = np.asarray(initial_rz, dtype=np.float64)
     trial_points = [
-        np.array(initial_rz, dtype=np.float64),
-        np.array([initial_rz[0] + delta_r, initial_rz[1]], dtype=np.float64),
-        np.array([initial_rz[0] - delta_r, initial_rz[1]], dtype=np.float64),
+        init,
+        init + np.array([delta_r, 0.0]),
+        init - np.array([delta_r, 0.0]),
+        init + np.array([0.0, delta_r]),
+        init - np.array([0.0, delta_r]),
     ]
+    # De-duplicate (paranoia if delta_r == 0)
+    unique_trials = []
+    for p in trial_points:
+        if not any(np.allclose(p, q) for q in unique_trials):
+            unique_trials.append(p)
+
     trial_results = sorted(
-        [(np.linalg.norm(axis_residual(p)), p) for p in trial_points],
+        [(np.linalg.norm(axis_residual(p)), p) for p in unique_trials],
         key=lambda x: x[0],
     )
-    start_rz = trial_results[0][1]
-    result = root(axis_residual, start_rz, method='hybr', tol=xtol, options={'maxfev': max_iter, 'factor': 100})
-    if result.success:
-        fld, ist = trace_fieldline(initial_rz=result.x, nturn=2, nphi=360, verbose=False)
-    else:
-        ist = -1
-        fld = None
-    if fld is not None and ist == 0:
-        R0 = np.mean(np.sqrt(fld[:360, 0]**2 + fld[:360, 1]**2))
-        return result.x, R0, fld, True
-    else:
-        return None, None, None, False
+
+    # A good axis returns to its starting point after one turn.  Be slightly
+    # more tolerant than the solver's own `xtol`; find_axis is used with
+    # xtol between 1e-5 and 1e-10, and the trace interpolation itself has a
+    # finite accuracy floor.
+    accept_tol = max(1e-6, 10.0 * max(float(xtol), 1e-12))
+
+    for _, start_rz in trial_results[:3]:
+        result = root(axis_residual, start_rz, method='hybr', tol=xtol,
+                      options={'maxfev': max_iter, 'factor': 100})
+        if not result.success:
+            continue
+        fld, ist = trace_fieldline(
+            initial_rz=result.x, nturn=2, nphi=nphi, verbose=False)
+        if fld is None or ist != 0:
+            continue
+        final_res = float(np.linalg.norm(
+            [fld[n_one_turn, 0] - result.x[0],
+             fld[n_one_turn, 1] - result.x[1]]))
+        if final_res <= accept_tol:
+            R0 = float(np.mean(
+                np.sqrt(fld[:n_one_turn, 0]**2 + fld[:n_one_turn, 1]**2)))
+            if verbose:
+                print(f"  Axis found: R={result.x[0]:.6f}, Z={result.x[1]:.6f}, "
+                      f"one-turn residual={final_res:.2e}")
+            return result.x, R0, fld, True
+
+    return None, None, None, False
+
+
+def find_axis_multi_guess(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
+                          max_iter=100, delta_r=0.01, axis_z_tol=1e-6,
+                          nphi=360, verbose=False):
+    """Scan R at fixed Z and return every distinct magnetic axis found.
+
+    Each R guess is passed to the (already robust) `find_axis`; this wrapper
+    implements the multi-guess strategy for island mapping: a coil-current
+    vector is axis-feasible if ANY R in the scan reaches an axis with
+    |Z_axis| <= axis_z_tol.
+
+    Returns
+    -------
+    axes : list[tuple[float, float]]
+        Distinct (R, Z) axes found.  The caller can mark a sample as
+        multi-axis when several axes are sufficiently separated.
+    """
+    axes = []
+    r = float(rmin)
+    while r <= float(rmax) + 1e-12:
+        guess = np.array([r, float(z0)], dtype=np.float64)
+        try:
+            axis_rz, _, _, ok = find_axis(
+                guess, xtol=xtol, max_iter=max_iter,
+                delta_r=delta_r, nphi=nphi, verbose=False)
+        except Exception:
+            axis_rz, ok = None, False
+        if ok and abs(axis_rz[1]) <= axis_z_tol:
+            # Store distinct axes only (avoid duplicates from neighbouring
+            # R guesses converging to the same fixed point).
+            if not any(np.hypot(axis_rz[0] - a[0], axis_rz[1] - a[1]) < 1e-4
+                       for a in axes):
+                axes.append((float(axis_rz[0]), float(axis_rz[1])))
+        r += float(rstep)
+    return axes
