@@ -14,8 +14,10 @@ Oracles (in order of increasing cost and fidelity):
 
 from __future__ import annotations
 
+import contextlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -47,8 +49,12 @@ def _worker_init(cfg: OptimizationConfig, params: dict):
     global _worker_cfg, _worker_params
     _worker_cfg = cfg
     _worker_params = params
-    initialize_mgrid_field(
-        str(cfg.mgrid_path), nfp=cfg.nfp, full_torus=cfg.full_torus)
+    # One worker prints one "Loaded mgrid" line; suppress it so large pools
+    # do not flood the console log.
+    with open(os.devnull, "w") as sink:
+        with contextlib.redirect_stdout(sink):
+            initialize_mgrid_field(
+                str(cfg.mgrid_path), nfp=cfg.nfp, full_torus=cfg.full_torus)
 
 
 def _map_point(point: np.ndarray) -> dict:
