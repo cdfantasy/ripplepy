@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import multiprocessing
+import sys
 
 import numpy as np
 
@@ -26,7 +27,7 @@ import numpy as np
 # ---------------------------------------------------------------------------
 BASE = Path(__file__).resolve().parent.parent   # tests/ -> ripplepy/
 MGRID_PATH = BASE / "tests" / "test_file" / "mgrid_h1_design.nc"
-OUTPUT_DIR = BASE / "tests" / "h1_optimisation"
+RESULTS_ROOT = BASE / "tests" / "h1_optimisation"
 
 # ---------------------------------------------------------------------------
 # Problem / pipeline settings
@@ -40,16 +41,22 @@ DELT_R = 0.1
 # 1-D nominal currents -> automatic bounds (see OptimizationConfig)
 BOUNDS_FRACTION = 0.2
 
+# Coil indices to keep fixed at their nominal current during the whole run.
+# For H1 it is usually a good idea to fix the TF coil (typically the one that
+# mainly sets the average toroidal field) so epsilon_eff improvements are
+# geometric rather than an overall field-strength drift.  Empty = all coils free.
+FIXED_COILS = []   # e.g. [0] to fix coil 0 (confirm which index is TF first)
+
 # Adaptive feasible-region exploration
 EXPLORE = True                # set False to skip and use BOUNDS_FRACTION directly
 SURVEY_N_SAMPLES = 256
 EXPLORE_MAX_ROUNDS = 5
-EXPLORE_EXPAND = 1.5
-EXPLORE_CRITERION = "short_trace"  # "axis" | "short_trace" | "full"
+EXPLORE_EXPAND = 1.25
+EXPLORE_CRITERION = "full"  # "axis" | "short_trace" | "full"
 
 # Differential Evolution (JADE) settings
-N_POP = 40
-MAX_GEN = 30
+N_POP = 64
+MAX_GEN = 50
 FTOL = 1e-8
 PATIENCE = 15
 SEED = 42
@@ -104,6 +111,81 @@ def verify_extcur(extcur, label, initial_rz=INITIAL_RZ):
     return float(eps)
 
 
+def make_initial_bounds():
+    """Return the search-box definition [nominal, fraction] per coil.
+
+    1-D nominal currents are auto-expanded by BOUNDS_FRACTION; coils listed
+    in FIXED_COILS are locked at nominal (fraction = 0).
+    """
+    if not FIXED_COILS:
+        return NOMINAL_EXTCUR.copy()
+    fracs = np.full(len(NOMINAL_EXTCUR), BOUNDS_FRACTION, dtype=np.float64)
+    for idx in FIXED_COILS:
+        fracs[idx] = 0.0
+    return np.column_stack([NOMINAL_EXTCUR, fracs])
+
+
+def make_run_dir():
+    """Create (without overwriting) a per-run result folder named by the
+    key optimisation parameters, so a new run never deletes previous results.
+
+    Naming scheme:
+        dr<delt_r>_pop<n_pop>_gen<max_gen>_b<bounds>
+        _<criterion>_fix<coils|allfree>_seed<seed>
+    If the folder already exists, ``_run2``, ``_run3`` ... is appended.
+    """
+    fixed_tag = "fix" + "".join(str(i) for i in FIXED_COILS) if FIXED_COILS else "allfree"
+    parts = [
+        f"dr{DELT_R:g}",
+        f"pop{N_POP}",
+        f"gen{MAX_GEN}",
+        f"b{BOUNDS_FRACTION:g}",
+        EXPLORE_CRITERION,
+        fixed_tag,
+        f"seed{SEED}",
+    ]
+    base = RESULTS_ROOT / "_".join(parts)
+    candidate = base
+    idx = 2
+    while candidate.exists():
+        candidate = RESULTS_ROOT / f"{base.name}_run{idx}"
+        idx += 1
+    candidate.mkdir(parents=True, exist_ok=True)
+    return candidate
+
+
+class Tee:
+    """Write stdout/stderr to the original stream and a run log file."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            try:
+                stream.write(data)
+                stream.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        for stream in self.streams:
+            try:
+                return stream.fileno()
+            except Exception:
+                continue
+        return 1
+
+
 def main():
     """Run the end-to-end H1 optimisation (wrapped for multiprocessing safety)."""
     from ripplepy import initialize_mgrid_field, set_extcur
@@ -115,11 +197,19 @@ def main():
     print("H1 Coil-Current Optimisation — end-to-end pipeline")
     print("=" * 60)
 
-    if OUTPUT_DIR.exists():
-        print(f"\nOutput directory {OUTPUT_DIR} already exists — deleting it …")
-        import shutil
-        shutil.rmtree(OUTPUT_DIR)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    run_dir = make_run_dir()
+
+    # Mirror all stdout/stderr to a file inside this run's folder, so
+    # `nohup python -u h1_optimise.py &` (or any redirection) does not leave
+    # the run log in the working directory for manual moving.
+    console_log_path = run_dir / "console.log"
+    _orig_stdout, _orig_stderr = sys.stdout, sys.stderr
+    _console_fh = open(console_log_path, "w", buffering=1)
+    sys.stdout = Tee(_orig_stdout, _console_fh)
+    sys.stderr = Tee(_orig_stderr, _console_fh)
+
+    print(f"\nResults will be saved to {run_dir}")
+    print(f"Console output is being written to {console_log_path}")
 
     # ── 1.  Initialise the magnetic field ──
     print(f"\nLoading mgrid from {MGRID_PATH}")
@@ -128,15 +218,18 @@ def main():
     print(f"  Nominal coil currents: {NOMINAL_EXTCUR}")
 
     # ── 2.  Search box: auto bounds + adaptive feasible-region exploration ──
+    initial_bounds = make_initial_bounds()
+    if FIXED_COILS:
+        print(f"  Fixed coils (fraction=0): {FIXED_COILS}")
     config = OptimizationConfig(
         mgrid_path=str(MGRID_PATH),
         nfp=NFP,
         full_torus=FULL_TORUS,
         initial_rz=INITIAL_RZ,
-        initial_bounds=NOMINAL_EXTCUR,       # 1-D -> auto +/-bounds_fraction
+        initial_bounds=initial_bounds,
         delt_r=DELT_R,
         bounds_fraction=BOUNDS_FRACTION,
-        output_dir=OUTPUT_DIR,
+        output_dir=run_dir,
     )
 
     if EXPLORE:
@@ -154,8 +247,10 @@ def main():
     else:
         print("\n=== [explore] skipped (EXPLORE=False) — using auto ±"
               f"{int(BOUNDS_FRACTION * 100)}% bounds ===")
-        search_bounds = np.column_stack(
-            [NOMINAL_EXTCUR, np.full(len(NOMINAL_EXTCUR), BOUNDS_FRACTION)])
+        search_bounds = make_initial_bounds()
+        if search_bounds.ndim == 1:
+            search_bounds = np.column_stack(
+                [search_bounds, np.full(len(search_bounds), BOUNDS_FRACTION)])
 
     n_cores = multiprocessing.cpu_count()
     print(f"\nDetected {n_cores} CPU cores — using all for optimisation.")
@@ -176,10 +271,9 @@ def main():
         F=0.5,
         CR=0.7,
         processes=n_cores,
-        output_dir=OUTPUT_DIR,
+        output_dir=run_dir,
         csv_filename="h1_optimisation_log.csv",
         device_name="H1",
-        log_file=OUTPUT_DIR / "h1_optimisation.log",
         log_level=logging.INFO,
         ftol=FTOL,
         patience=PATIENCE,
@@ -197,7 +291,7 @@ def main():
     print(f"  Population   : {de_config.n_pop}")
     print(f"  Max gen      : {de_config.max_gen} (ftol={FTOL}, patience={PATIENCE})")
     print(f"  Strategy     : jade (adaptive F/CR)")
-    print(f"  Output       : {OUTPUT_DIR}")
+    print(f"  Output       : {run_dir}")
     print()
 
     de = DifferentialEvolution(de_config)
@@ -274,7 +368,7 @@ def main():
         ax2.grid(True, axis="y", alpha=0.3)
 
         fig.tight_layout()
-        plot_path = OUTPUT_DIR / "h1_convergence.png"
+        plot_path = run_dir / "h1_convergence.png"
         fig.savefig(plot_path, dpi=150)
         print(f"\nConvergence plot saved -> {plot_path}")
         plt.close()
@@ -282,7 +376,11 @@ def main():
     except ImportError:
         print("\n(matplotlib not available — skipping convergence plot)")
 
-    print("\nDone.")
+    sys.stdout = _orig_stdout
+    sys.stderr = _orig_stderr
+    _console_fh.close()
+    print(f"\nConsole output saved to {console_log_path}")
+    print("Done.")
 
 
 if __name__ == "__main__":

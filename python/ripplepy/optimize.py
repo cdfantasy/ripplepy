@@ -574,7 +574,7 @@ def save_csv(individual_infos: list[dict], filename: Path):
     filename = Path(filename)
     filename.parent.mkdir(parents=True, exist_ok=True)
     headers = [
-        "Generation", "Individual", "extcur", "epsilon_eff",
+        "Generation", "Individual", "extcur", "axis_R", "epsilon_eff",
         "iota", "volume", "Aspect ratio", "average B",
         "failure_flag", "failure_type", "failure_message",
     ]
@@ -582,10 +582,14 @@ def save_csv(individual_infos: list[dict], filename: Path):
         writer = csv.writer(f)
         writer.writerow(headers)
         for info in individual_infos:
+            axis_rz = info.get("axis_rz")
+            axis_r = float(axis_rz[0]) if isinstance(axis_rz, np.ndarray) \
+                and axis_rz.size >= 1 else ""
             writer.writerow([
                 info.get("Generation"),
                 info.get("Individual"),
                 _csv_value(info.get("extcur")),
+                axis_r,
                 info.get("epsilon_eff"),
                 info.get("iota"),
                 info.get("volume"),
@@ -834,8 +838,8 @@ def survey_feasibility(
     elif feasible_rate <= 0.5:
         # Mostly infeasible → shrink onto the feasible island.
         for d in range(n_dim):
-            if abs(nominal_vals[d]) < 1e-12:
-                continue
+            if abs(nominal_vals[d]) < 1e-12 or old_fracs[d] <= 0:
+                continue   # keep nominal=0 and locked coils fixed
             vals = points[feasible, d]
             if n_feasible == 0:
                 continue
@@ -1219,12 +1223,15 @@ class DifferentialEvolution:
 
             pct_invalid = invalid_solutions / self.cfg.n_pop * 100
             best_extcur = self.pop[best_idx]
+            best_axis = self._axes[best_idx]
+            axis_r_str = f"{best_axis[0]:.4f}" if best_axis is not None else "n/a"
             logger.info(
                 "Gen %3d/%d  |  best ε=%.6e  |  best-ever ε=%.6e  |  "
-                "invalid=%3d/%d (%.1f%%)  |  time=%6.2fs  |  extcur=%s",
+                "invalid=%3d/%d (%.1f%%)  |  time=%6.2fs  |  "
+                "best ind=%d | axis R=%s | extcur=%s",
                 gen, self.cfg.max_gen, best_fit, self._best_ever_fit,
                 invalid_solutions, self.cfg.n_pop, pct_invalid,
-                t_elapsed,
+                t_elapsed, best_idx, axis_r_str,
                 np.array2string(best_extcur, separator=', ',
                                 formatter={'float_kind': lambda x: '%.1f' % x}),
             )

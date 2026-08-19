@@ -3,8 +3,14 @@
 
 Usage
 -----
-    python tests/plot_opt_result.py
+    python tests/plot_opt_result.py                          # cwd if it has the CSV,
+                                                             # else latest run dir
+    python tests/plot_opt_result.py <run_dir>
+    cd tests/h1_optimisation/<run_dir> && python ../../plot_opt_result.py
 """
+
+import argparse
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
@@ -533,8 +539,48 @@ def plot_coils_vs_epsilon(
 # 6. 入口
 # ═══════════════════════════════════════════════════════════════════════════
 
+def find_latest_run_dir(root):
+    """Return the most recently modified run directory containing a log CSV."""
+    root = Path(root)
+    if not root.exists():
+        return None
+    candidates = [d for d in root.iterdir()
+                  if d.is_dir() and (d / 'h1_optimisation_log.csv').exists()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: d.stat().st_mtime)
+
+
 if __name__ == '__main__':
-    log_file = 'tests/h1_optimisation/h1_optimisation_log.csv'
+    parser = argparse.ArgumentParser(
+        description='Plot results from an H1 optimisation run directory.')
+    parser.add_argument(
+        'run_dir', nargs='?', default=None,
+        help='run directory containing h1_optimisation_log.csv; '
+             'defaults to the latest run under tests/h1_optimisation')
+    parser.add_argument(
+        '--root', default='tests/h1_optimisation',
+        help='directory scanned for run folders when no run_dir is given')
+    args = parser.parse_args()
+
+    if args.run_dir:
+        run_dir = Path(args.run_dir)
+    elif (Path.cwd() / 'h1_optimisation_log.csv').exists():
+        # Run from inside a result folder: plot that folder.
+        run_dir = Path.cwd()
+    else:
+        run_dir = find_latest_run_dir(args.root)
+
+    if run_dir is None:
+        raise SystemExit(
+            'No optimisation run directory found under '
+            f"'{args.root}'.  Pass a run_dir explicitly.")
+
+    log_file = run_dir / 'h1_optimisation_log.csv'
+    if not log_file.exists():
+        raise SystemExit(f'Log CSV not found: {log_file}')
+
+    print(f'Using run directory: {run_dir}')
     data, generations, max_ind, start_data = load_optimization_log(log_file)
     print(f'Loaded {len(generations)} generation(s), max individual = {max_ind}')
     
@@ -543,12 +589,12 @@ if __name__ == '__main__':
     # Plot 1
     plot_generation_vs_quantity(
         data, generations, y_key='epsilon_eff',
-        output='tests/h1_optimisation/ripple_generation.png',
+        output=run_dir / 'ripple_generation.png',
         cmap=cmap_choice,
     )
     plot_generation_vs_quantity(
         data, generations, y_key='iota',
-        output='tests/h1_optimisation/iota_generation.png',
+        output=run_dir / 'iota_generation.png',
         cmap=cmap_choice,
     )
 
@@ -556,19 +602,19 @@ if __name__ == '__main__':
     plot_quantity_vs_quantity(
         data, generations,
         x_key='iota', y_key='epsilon_eff',
-        output='tests/h1_optimisation/iota_ripple.png',
+        output=run_dir / 'iota_ripple.png',
         cmap=cmap_choice,
     )
     plot_quantity_vs_quantity(
         data, generations,
         x_key='Aspect ratio', y_key='epsilon_eff',
-        output='tests/h1_optimisation/asp_ripple.png',
+        output=run_dir / 'asp_ripple.png',
         cmap=cmap_choice,
     )
 
     # Plot 3
     plot_coils_vs_epsilon(
         data, generations,
-        output='tests/h1_optimisation/coils_vs_eps.png',
+        output=run_dir / 'coils_vs_eps.png',
         cmap=cmap_choice,
     )
