@@ -66,7 +66,6 @@ def _map_point(point: np.ndarray) -> dict:
         "extcur": extcur,
         "axis_feasible": False,
         "axis_count": 0,
-        "axis_multi": False,
         "axis_used_RZ": np.array([np.nan, np.nan]),
         "short_feasible": False,
         "short_istate": -9999,
@@ -88,19 +87,27 @@ def _map_point(point: np.ndarray) -> dict:
     if not axes:
         return out
     out["axis_feasible"] = True
-    out["axis_multi"] = len(axes) > 1
-    if out["axis_multi"]:
-        # Multi-axis configurations are recorded but NOT treated as true
-        # islands (they may be degenerate / doublet configurations).
-        return out
 
-    # Refine the single axis with full poloidal resolution.
-    guess = np.array([axes[0][0], axes[0][1]], dtype=np.float64)
-    axis_rz, _, _, ok = find_axis(guess, xtol=1e-5, max_iter=100,
-                                  delta_r=0.01, nphi=360)
-    if not ok or abs(axis_rz[1]) > cfg.axis_z_tol:
+    # Pick the first candidate that survives full-resolution refinement and
+    # use it for the trace.  No special multi-axis handling: the user already
+    # knows which current combinations are doublet/multi-axis cases.
+    chosen = None
+    for (Rc, Zc) in axes:
+        guess = np.array([Rc, Zc], dtype=np.float64)
+        try:
+            axis_rz, _, _, ok = find_axis(guess, xtol=1e-5, max_iter=100,
+                                          delta_r=0.01, nphi=360)
+        except Exception:
+            ok = False
+        if ok and abs(axis_rz[1]) <= cfg.axis_z_tol:
+            chosen = axis_rz
+            break
+
+    if chosen is None:
+        out["axis_feasible"] = False
         return out
-    out["axis_used_RZ"] = np.asarray(axis_rz, dtype=np.float64)
+    out["axis_used_RZ"] = np.asarray(chosen, dtype=np.float64)
+    axis_rz = out["axis_used_RZ"]
 
     start_rz = np.array([axis_rz[0] + p["delt_r"], axis_rz[1]],
                         dtype=np.float64, order="F")
@@ -234,7 +241,7 @@ def full_feasible_suggested_bounds(res: dict, broad_bounds: np.ndarray,
     `broad_bounds` when too few feasible points were found.
     """
     broad_bounds = np.asarray(broad_bounds, dtype=np.float64)
-    mask = res["full_feasible"].astype(bool) & ~res["axis_multi"].astype(bool)
+    mask = res["full_feasible"].astype(bool)
     if int(mask.sum()) < int(min_points):
         return broad_bounds.copy()
     pts = res["samples"][mask]
@@ -308,7 +315,6 @@ def map_feasible_islands(
     n = len(results)
     axis_feasible = np.zeros(n, dtype=bool)
     axis_count = np.zeros(n, dtype=np.uint8)
-    axis_multi = np.zeros(n, dtype=bool)
     axis_used_RZ = np.full((n, 2), np.nan, dtype=np.float64)
     short_feasible = np.zeros(n, dtype=bool)
     short_istate = np.full(n, -9999, dtype=np.int32)
@@ -320,7 +326,6 @@ def map_feasible_islands(
     for k, r in enumerate(results):
         axis_feasible[k] = r["axis_feasible"]
         axis_count[k] = r["axis_count"]
-        axis_multi[k] = r["axis_multi"]
         axis_used_RZ[k] = r["axis_used_RZ"]
         short_feasible[k] = r["short_feasible"]
         short_istate[k] = r["short_istate"]
@@ -343,7 +348,6 @@ def map_feasible_islands(
         "samples": samples,
         "axis_feasible": axis_feasible,
         "axis_count": axis_count,
-        "axis_multi": axis_multi,
         "axis_used_RZ": axis_used_RZ,
         "short_feasible": short_feasible,
         "short_istate": short_istate,
@@ -380,7 +384,6 @@ def save_island_mapping_h5(path: Path, res: dict):
         f.create_dataset("samples", data=res["samples"])
         f.create_dataset("axis_feasible", data=res["axis_feasible"].astype(np.uint8))
         f.create_dataset("axis_count", data=res["axis_count"])
-        f.create_dataset("axis_multi", data=res["axis_multi"].astype(np.uint8))
         f.create_dataset("axis_used_RZ", data=res["axis_used_RZ"])
         f.create_dataset("short_feasible", data=res["short_feasible"].astype(np.uint8))
         f.create_dataset("short_istate", data=res["short_istate"])
@@ -412,7 +415,6 @@ def load_island_mapping_h5(path: Path) -> dict:
         res["samples"] = f["samples"][()]
         res["axis_feasible"] = f["axis_feasible"][()].astype(bool)
         res["axis_count"] = f["axis_count"][()]
-        res["axis_multi"] = f["axis_multi"][()].astype(bool)
         res["axis_used_RZ"] = f["axis_used_RZ"][()]
         res["short_feasible"] = f["short_feasible"][()].astype(bool)
         res["short_istate"] = f["short_istate"][()]

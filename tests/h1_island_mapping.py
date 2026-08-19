@@ -102,6 +102,9 @@ def main():
                         help="recompute layers even if an HDF5 file exists")
     parser.add_argument("--smoke", action="store_true",
                         help="tiny single-layer run into tests/h1_islands_smoke")
+    parser.add_argument("--cluster-eps", type=float, default=CLUSTER_EPS)
+    parser.add_argument("--cluster-min-samples", type=int,
+                        default=CLUSTER_MIN_SAMPLES)
     args = parser.parse_args()
 
     global OUTPUT_ROOT, DELT_R_LIST, N_PRE_SURVEY, N_SAMPLES_FIRST
@@ -186,15 +189,14 @@ def main():
             smooth_residual_tol=SMOOTH_RESIDUAL_TOL,
             smooth_max_gap=SMOOTH_MAX_GAP,
             smooth_min_points=SMOOTH_MIN_POINTS,
-            cluster_eps=CLUSTER_EPS,
-            cluster_min_samples=CLUSTER_MIN_SAMPLES,
+            cluster_eps=args.cluster_eps,
+            cluster_min_samples=args.cluster_min_samples,
             processes=args.processes,
             seed=42 + int(dr*100),
             output_h5=h5,
         )
 
         print(f"  axis_feasible    : {res['axis_feasible'].sum()}/{len(samples)}")
-        print(f"  axis_multi       : {res['axis_multi'].sum()}")
         print(f"  short_feasible   : {res['short_feasible'].sum()}")
         print(f"  full_feasible    : {res['full_feasible'].sum()}")
         print(f"  islands          : {len(res['islands'])}")
