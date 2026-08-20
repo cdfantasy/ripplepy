@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -104,11 +105,39 @@ def verify_full_res(extcur, label, initial_rz):
     return float(eps)
 
 
+class Tee:
+    """Mirror stdout/stderr to the console and a run log file."""
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for stream in self.streams:
+            try:
+                stream.write(data)
+                stream.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        for stream in self.streams:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+
+
 def main():
     from ripplepy import initialize_mgrid_field, set_extcur
     from ripplepy.optimize import DifferentialEvolution, OptimizationConfig
 
     run_dir = make_run_dir()
+
+    # Save all console output into this run's folder.
+    _orig_stdout, _orig_stderr = sys.stdout, sys.stderr
+    console_log = open(run_dir / "console.log", "w", buffering=1)
+    sys.stdout = Tee(_orig_stdout, console_log)
+    sys.stderr = Tee(_orig_stderr, console_log)
+
     print(f"Output -> {run_dir}")
     print("Bounds:")
     for i, (lo, hi) in enumerate(BOUNDS):
@@ -121,14 +150,14 @@ def main():
     initialize_mgrid_field(str(MGRID_PATH), nfp=NFP, full_torus=FULL_TORUS)
     set_extcur(NOMINAL_EXTCUR)
 
-    baseline = BOUNDS.mean(axis=1)
-
+    # Baseline is always the standard NOMINAL_EXTCUR, even though it lies
+    # outside this island's box.  The DE search box is overridden below.
     cfg = OptimizationConfig(
         mgrid_path=str(MGRID_PATH),
         nfp=NFP,
         full_torus=FULL_TORUS,
         initial_rz=INITIAL_RZ,
-        initial_bounds=np.column_stack([baseline, np.zeros(len(baseline))]),
+        initial_bounds=NOMINAL_EXTCUR,
         nturn=DE_NTURN,
         nphi=DE_NPHI,
         npart=DE_NPART,
@@ -146,6 +175,7 @@ def main():
         patience=PATIENCE,
         seed=SEED,
         min_minor_radius=MIN_MINOR_RADIUS,
+        adapt_bounds=False,   # stay strictly inside the manual island box
     )
     # Override the symmetric config bounds by the manual absolute box.
     cfg._abs_bounds = BOUNDS.copy()
@@ -169,7 +199,11 @@ def main():
         best_axis = INITIAL_RZ
     verify_full_res(best_individual, "best    ", initial_rz=best_axis)
 
-    print("\nDone.")
+    sys.stdout = _orig_stdout
+    sys.stderr = _orig_stderr
+    console_log.close()
+    print(f"\nConsole output saved to {run_dir / 'console.log'}")
+    print("Done.")
 
 
 if __name__ == "__main__":
