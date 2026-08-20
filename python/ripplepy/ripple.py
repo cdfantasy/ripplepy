@@ -463,6 +463,33 @@ def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
     return None, None, None, False
 
 
+def find_axis_any(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
+                  max_iter=100, delta_r=0.01, axis_z_tol=1e-6,
+                  nphi=360, verbose=False):
+    """Scan R at fixed Z and return as soon as one valid axis is found.
+
+    This is the early-exit version of `find_axis_multi_guess`, used when the
+    caller does not care whether several axes exist.  In a box where most
+    samples are axis-feasible it cuts the average axis-scan cost by roughly
+    (rmax-rmin)/rstep, because the scan stops after the first good R guess.
+    """
+    axes = []
+    r = float(rmin)
+    while r <= float(rmax) + 1e-12:
+        guess = np.array([r, float(z0)], dtype=np.float64)
+        try:
+            axis_rz, _, _, ok = find_axis(
+                guess, xtol=xtol, max_iter=max_iter,
+                delta_r=delta_r, nphi=nphi, verbose=False)
+        except Exception:
+            axis_rz, ok = None, False
+        if ok and abs(axis_rz[1]) <= axis_z_tol:
+            axes.append((float(axis_rz[0]), float(axis_rz[1])))
+            break
+        r += float(rstep)
+    return axes
+
+
 def find_axis_multi_guess(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
                           max_iter=100, delta_r=0.01, axis_z_tol=1e-6,
                           nphi=360, verbose=False):

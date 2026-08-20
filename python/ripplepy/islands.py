@@ -18,6 +18,7 @@ import contextlib
 import json
 import multiprocessing
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -30,7 +31,7 @@ from .optimize import OptimizationConfig
 from .ripple import (
     fieldline_smoothness_poincare,
     find_axis,
-    find_axis_multi_guess,
+    find_axis_any,
     initialize_mgrid_field,
     set_extcur,
     trace_fieldline,
@@ -77,9 +78,9 @@ def _map_point(point: np.ndarray) -> dict:
 
     set_extcur(extcur)
 
-    # L1: multi-guess axis scan.  Coarse nphi=180 keeps the scan cheap; the
-    # selected axis is refined below with the full-resolution find_axis.
-    axes = find_axis_multi_guess(
+    # L1: early-exit axis scan.  The first valid |Z|<=tol axis is enough;
+    # the selected axis is refined below with the full-resolution find_axis.
+    axes = find_axis_any(
         rmin=p["rmin"], rmax=p["rmax"], rstep=p["rstep"], z0=0.0,
         xtol=1e-6, max_iter=100, delta_r=0.01,
         axis_z_tol=cfg.axis_z_tol, nphi=180)
@@ -145,6 +146,12 @@ def _map_point(point: np.ndarray) -> dict:
         return out
     out["full_feasible"] = True
     return out
+
+
+def _map_point_indexed(args):
+    """Pool-friendly wrapper that keeps the original sample index."""
+    idx, point = args
+    return idx, _map_point(point)
 
 
 def sample_bounds(bounds: np.ndarray, n_samples: int, seed: int = 0) -> np.ndarray:
@@ -281,6 +288,7 @@ def map_feasible_islands(
     samples: Optional[np.ndarray] = None,
     output_h5: Optional[Path] = None,
     do_cluster: bool = True,
+    progress_interval: int = 500,
 ) -> dict:
     """Map feasible-current islands at one delt_r.
 
@@ -307,10 +315,48 @@ def map_feasible_islands(
         smooth_min_points=int(smooth_min_points),
     )
 
-    n_workers = _n_workers(processes)
-    with multiprocessing.Pool(processes=n_workers, initializer=_worker_init,
-                              initargs=(cfg, params)) as pool:
-        results = pool.map(_map_point, samples)
+    n_tasks = int(samples.shape[0])
+    t0 = time.perf_counter()
+    results_by_idx = {}
+
+    if processes == 0:
+        # Serial fallback (also useful for local smoke tests where /dev/shm
+        # is not writable and multiprocessing cannot start).
+        _worker_init(cfg, params)
+        print(f"  mapping {n_tasks} samples serially "
+              f"(progress every {progress_interval})", flush=True)
+        for k in range(n_tasks):
+            results_by_idx[k] = _map_point(samples[k])
+            done = k + 1
+            if progress_interval > 0 and done % progress_interval == 0:
+                elapsed = time.perf_counter() - t0
+                rate = done / max(elapsed, 1e-12)
+                eta = (n_tasks - done) / max(rate, 1e-12)
+                print(f"    {done}/{n_tasks} samples done, "
+                      f"{rate:.1f} samples/s, elapsed {elapsed:.0f}s, "
+                      f"ETA {eta:.0f}s", flush=True)
+    else:
+        n_workers = _n_workers(processes)
+        tasks = [(k, samples[k]) for k in range(n_tasks)]
+        print(f"  mapping {n_tasks} samples with {n_workers} workers "
+              f"(progress every {progress_interval})", flush=True)
+        with multiprocessing.Pool(processes=n_workers,
+                                  initializer=_worker_init,
+                                  initargs=(cfg, params)) as pool:
+            for done, (idx, res) in enumerate(
+                    pool.imap_unordered(_map_point_indexed, tasks,
+                                        chunksize=1),
+                    start=1):
+                results_by_idx[idx] = res
+                if progress_interval > 0 and done % progress_interval == 0:
+                    elapsed = time.perf_counter() - t0
+                    rate = done / max(elapsed, 1e-12)
+                    eta = (n_tasks - done) / max(rate, 1e-12)
+                    print(f"    {done}/{n_tasks} samples done, "
+                          f"{rate:.1f} samples/s, elapsed {elapsed:.0f}s, "
+                          f"ETA {eta:.0f}s", flush=True)
+
+    results = [results_by_idx[k] for k in range(n_tasks)]
 
     n = len(results)
     axis_feasible = np.zeros(n, dtype=bool)

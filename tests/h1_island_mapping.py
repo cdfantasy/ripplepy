@@ -31,19 +31,34 @@ FIXED_COILS = [0]
 # full-feasible points found in this box (borrowing survey_feasibility's idea).
 ENGINEERING_BOUNDS = np.array([
     [ 50000.0,   50000.0],  # coil 0: TF, fixed
-    [  1000.0,    8000.0],  # coil 1
-    [   300.0,    4500.0],  # coil 2
+    [     0.0,   10000.0],  # coil 1
+    [     0.0,   10000.0],  # coil 2
     [-220000.0,  -40000.0], # coil 3
     [-100000.0,  -10000.0], # coil 4
 ])
 
 DELT_R_LIST = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
 
+# Previously found good staged-delt_r solutions.  Used as a safety prior when
+# deriving the first-layer mapping bounds: the data-driven q02/q98 box is
+# expanded, if necessary, so none of these known-good currents are clipped.
+KNOWN_GOOD_SOLUTIONS = np.array([
+    [50000.0, 2401.9, 1419.6, -107178.6, -61004.8],  # delt_r = 0.06
+    [50000.0, 2527.9, 1036.3, -133371.7, -67991.6],  # delt_r = 0.07
+    [50000.0, 2304.1,  829.0, -153739.6, -63354.3],  # delt_r = 0.08
+    [50000.0, 2123.8,  735.0, -153850.7, -58941.5],  # delt_r = 0.09
+    [50000.0, 2053.3,  792.5, -175575.9, -51580.6],  # delt_r = 0.10
+    [50000.0, 2078.4,  855.9, -174436.2, -50388.2],  # delt_r = 0.11
+    [50000.0, 2494.1,  980.6, -139549.0, -40340.2],  # delt_r = 0.12
+])
+
 # Phase 1 sampling budget (per layer)
+# First layer maps directly on the engineering box.  Subsequent layers draw
+# per-island local samples + a small global verification set; keep these
+# modest so a 7-layer overnight run stays feasible.
 N_PRE_SURVEY = 4096
-N_SAMPLES_FIRST = 32768
-N_LOCAL_PER_ISLAND = 4000
-N_GLOBAL = 800
+N_LOCAL_PER_ISLAND = 1000
+N_GLOBAL = 200
 ALPHA = 1.5
 
 # Oracle parameters
@@ -57,6 +72,31 @@ SMOOTH_MIN_POINTS = 16
 
 CLUSTER_EPS = 0.15
 CLUSTER_MIN_SAMPLES = 5
+PROGRESS_INTERVAL = 500
+
+
+def ensure_known_good_inside(bounds, hard_bounds, margin_frac=0.05):
+    """Expand `bounds` so every known-good solution is inside it.
+
+    The q02/q98 pre-survey box can clip a known-good island when the
+    pre-survey has few full-feasible samples.  This prior only widens the box;
+    it never shrinks it and never exceeds `hard_bounds`.
+    """
+    bounds = np.asarray(bounds, dtype=np.float64).copy()
+    hard = np.asarray(hard_bounds, dtype=np.float64)
+    for good in KNOWN_GOOD_SOLUTIONS:
+        good = np.asarray(good, dtype=np.float64)
+        for d in range(bounds.shape[0]):
+            margin = margin_frac * max(abs(good[d]), 1.0)
+            bounds[d, 0] = min(bounds[d, 0], good[d] - margin)
+            bounds[d, 1] = max(bounds[d, 1], good[d] + margin)
+    # clamp back to the engineering hard-box; keep fixed coils fixed
+    bounds[:, 0] = np.maximum(bounds[:, 0], hard[:, 0])
+    bounds[:, 1] = np.minimum(bounds[:, 1], hard[:, 1])
+    fixed = hard[:, 0] == hard[:, 1]
+    bounds[fixed, 0] = hard[fixed, 0]
+    bounds[fixed, 1] = hard[fixed, 1]
+    return bounds
 
 
 def survey_first_bounds(cfg, dr, processes):
@@ -88,8 +128,10 @@ def survey_first_bounds(cfg, dr, processes):
     )
     bounds = full_feasible_suggested_bounds(
         pre, ENGINEERING_BOUNDS, min_points=8)
+    bounds = ensure_known_good_inside(bounds, ENGINEERING_BOUNDS)
     print(f"  pre-survey: axis_feasible={pre['axis_feasible'].sum()}, "
-          f"full_feasible={pre['full_feasible'].sum()} -> mapping bounds:")
+          f"full_feasible={pre['full_feasible'].sum()} -> mapping bounds "
+          f"(known-good safety prior applied):")
     for i, (lo, hi) in enumerate(bounds):
         print(f"    coil {i}: [{lo:.1f}, {hi:.1f}]")
     return bounds
@@ -107,20 +149,20 @@ def main():
                         default=CLUSTER_MIN_SAMPLES)
     args = parser.parse_args()
 
-    global OUTPUT_ROOT, DELT_R_LIST, N_PRE_SURVEY, N_SAMPLES_FIRST
+    global OUTPUT_ROOT, DELT_R_LIST, N_PRE_SURVEY
     global N_LOCAL_PER_ISLAND, N_GLOBAL, SHORT_NTURN, SHORT_NPHI
-    global FULL_NTURN, FULL_NPHI, SMOOTH_MIN_POINTS
+    global FULL_NTURN, FULL_NPHI, SMOOTH_MIN_POINTS, PROGRESS_INTERVAL
 
     if args.smoke:
         OUTPUT_ROOT = BASE / "tests" / "h1_islands_smoke"
         DELT_R_LIST = [0.06]
-        N_PRE_SURVEY = 64
-        N_SAMPLES_FIRST = 256
-        N_LOCAL_PER_ISLAND = 64
-        N_GLOBAL = 32
+        N_PRE_SURVEY = 32
+        N_LOCAL_PER_ISLAND = 16
+        N_GLOBAL = 8
         SHORT_NTURN, SHORT_NPHI = 5, 36
         FULL_NTURN, FULL_NPHI = 20, 72
         SMOOTH_MIN_POINTS = 8
+        PROGRESS_INTERVAL = 8
         args.force = True
         print("SMOKE MODE: tiny budgets, output -> tests/h1_islands_smoke")
 
@@ -146,7 +188,6 @@ def main():
         print(f"  coil {i}: [{lo:.1f}, {hi:.1f}]"
               f"{'  (fixed)' if lo == hi else ''}")
 
-    mapping_bounds = None
     prev = None
     for dr in DELT_R_LIST:
         h5 = OUTPUT_ROOT / f"islands_dr{dr:g}.h5"
@@ -159,17 +200,15 @@ def main():
             continue
 
         if prev is None:
-            # First layer actually being computed: derive its box from the
-            # low-resolution pre-survey on the engineering box.
-            if mapping_bounds is None:
-                mapping_bounds = survey_first_bounds(cfg, dr, args.processes)
-            bounds = mapping_bounds
-            samples = sample_bounds(bounds, N_SAMPLES_FIRST, seed=42 + int(dr*100))
-            print(f"  first layer: global Sobol samples = {samples.shape[0]}")
+            # First layer: map islands directly on the engineering box with
+            # N_PRE_SURVEY samples.  This is the same cascade as the old
+            # pre-survey, but it is clustered and saved immediately, so the
+            # first useful island map is available as soon as this finishes.
+            bounds = ENGINEERING_BOUNDS
+            samples = sample_bounds(bounds, N_PRE_SURVEY, seed=42 + int(dr*100))
+            print(f"  first layer: engineering-box mapping, samples = {samples.shape[0]}")
         else:
-            if mapping_bounds is None:
-                mapping_bounds = np.asarray(prev["bounds"], dtype=np.float64)
-            bounds = mapping_bounds
+            bounds = np.asarray(prev["bounds"], dtype=np.float64)
             samples = generate_next_samples(
                 prev, bounds,
                 n_local_per_island=N_LOCAL_PER_ISLAND,
@@ -194,6 +233,7 @@ def main():
             processes=args.processes,
             seed=42 + int(dr*100),
             output_h5=h5,
+            progress_interval=PROGRESS_INTERVAL,
         )
 
         print(f"  axis_feasible    : {res['axis_feasible'].sum()}/{len(samples)}")

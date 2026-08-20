@@ -51,6 +51,7 @@ log*
 threed*
 parvmec*
 timing*
+*.h5
 .png
 .reasonix/
 reasonix.toml
