@@ -74,9 +74,13 @@ def _map_point(point: np.ndarray) -> dict:
         "full_istate": -9999,
         "smooth_residual": np.nan,
         "smooth_max_gap": np.nan,
+        "t_axis": 0.0,
+        "t_short": 0.0,
+        "t_full": 0.0,
     }
 
     set_extcur(extcur)
+    t0 = time.perf_counter()
 
     # L1: early-exit axis scan.  The first valid |Z|<=tol axis is enough;
     # the selected axis is refined below with the full-resolution find_axis.
@@ -84,6 +88,7 @@ def _map_point(point: np.ndarray) -> dict:
         rmin=p["rmin"], rmax=p["rmax"], rstep=p["rstep"], z0=0.0,
         xtol=1e-6, max_iter=100, delta_r=0.01,
         axis_z_tol=cfg.axis_z_tol, nphi=180)
+    out["t_axis"] = time.perf_counter() - t0
     out["axis_count"] = len(axes)
     if not axes:
         return out
@@ -116,9 +121,11 @@ def _map_point(point: np.ndarray) -> dict:
     # L2: short trace.  initial_gradpsi left at zero: the RZ field-line path
     # is independent of the grad-psi variables, so this is exact for tracing
     # and avoids an extra B-interpolation call.
+    t1 = time.perf_counter()
     _, short_ist = trace_fieldline(
         initial_rz=start_rz, nturn=p["short_nturn"], nphi=p["short_nphi"],
         verbose=False)
+    out["t_short"] = time.perf_counter() - t1
     out["short_istate"] = short_ist
     if short_ist != 0:
         return out
@@ -127,11 +134,13 @@ def _map_point(point: np.ndarray) -> dict:
     # L3: full-resolution trace + Poincare smoothness check.  The trace and
     # the smoothness test are done separately so the smoothness metrics can be
     # recorded in the HDF5 state.
+    t2 = time.perf_counter()
     fld, full_ist = trace_fieldline(
         initial_rz=start_rz, nturn=p["full_nturn"], nphi=p["full_nphi"],
         verbose=False)
-    out["full_istate"] = full_ist
     if full_ist != 0:
+        out["t_full"] = time.perf_counter() - t2
+        out["full_istate"] = full_ist
         return out
     smooth, metrics = fieldline_smoothness_poincare(
         fld, p["full_nturn"], p["full_nphi"], axis_rz=axis_rz,
@@ -142,8 +151,10 @@ def _map_point(point: np.ndarray) -> dict:
     out["smooth_residual"] = metrics.get("residual_rms_frac", np.nan)
     out["smooth_max_gap"] = metrics.get("max_gap_rad", np.nan)
     if not smooth:
+        out["t_full"] = time.perf_counter() - t2
         out["full_istate"] = -2001
         return out
+    out["t_full"] = time.perf_counter() - t2
     out["full_feasible"] = True
     return out
 
@@ -357,6 +368,18 @@ def map_feasible_islands(
                           f"ETA {eta:.0f}s", flush=True)
 
     results = [results_by_idx[k] for k in range(n_tasks)]
+
+    # Stage-timing summary (per sample, CPU-seconds as measured in worker).
+    t_axis = np.mean([r["t_axis"] for r in results])
+    t_short_all = np.mean([r["t_short"] for r in results])
+    t_full_all = np.mean([r["t_full"] for r in results])
+    n_full = int(sum(1 for r in results if r["t_full"] > 0))
+    t_full_done = (np.mean([r["t_full"] for r in results if r["t_full"] > 0])
+                   if n_full else 0.0)
+    print(f"  stage timing (mean CPU-s/sample): "
+          f"axis={t_axis:.2f}s, short={t_short_all:.2f}s, "
+          f"full={t_full_all:.2f}s (all); "
+          f"full={t_full_done:.2f}s over {n_full} full-trace samples", flush=True)
 
     n = len(results)
     axis_feasible = np.zeros(n, dtype=bool)
