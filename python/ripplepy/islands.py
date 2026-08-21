@@ -29,10 +29,13 @@ from scipy.stats.qmc import Sobol
 
 from .optimize import OptimizationConfig
 from .ripple import (
+    compute_epstot,
+    compute_initial_gradpsi_nemov,
     fieldline_smoothness_poincare,
     find_axis_any,
     initialize_mgrid_field,
     set_extcur,
+    set_trace_parameters,
     trace_fieldline,
 )
 
@@ -79,6 +82,7 @@ def _map_point(point: np.ndarray) -> dict:
         "full_istate": -9999,
         "smooth_residual": np.nan,
         "smooth_max_gap": np.nan,
+        "eps": np.nan,
         "t_axis": 0.0,
         "t_short": 0.0,
         "t_full": 0.0,
@@ -90,16 +94,17 @@ def _map_point(point: np.ndarray) -> dict:
     # L1: early-exit axis scan, warm-started from the axis R this worker found
     # for its previous sample (P1a).  scan_center only reorders the guesses in
     # the unchanged [rmin, rmax] window; the full window is still tried when
-    # the warm guess misses.  P2 fail-fast is kept conservative: full max_iter
-    # and fail_residual_tol=1.0 only skip guesses whose one-turn residual is
-    # hopeless (trace failed -> residual 1e10, or > 1 m drift), which the old
-    # solver burned maxfev on and still failed -- so axis-feasibility verdicts
-    # match the pre-P2 code (diagnostics showed hybr rescues residuals > 0.1).
+    # the warm guess misses.  P2 fail-fast: full max_iter; the residual gate is
+    # the scan-window width (rmax-rmin, 0.35 m here) -- a one-turn drift larger
+    # than the whole window means the guess is outside any reachable basin.
+    # Diagnostics showed hybr rescues residuals > 0.1, so the gate must stay
+    # above that; the window width does, with margin.
     axes = find_axis_any(
         rmin=p["rmin"], rmax=p["rmax"], rstep=p["rstep"], z0=0.0,
         xtol=1e-6, max_iter=100, delta_r=0.01,
         axis_z_tol=cfg.axis_z_tol, nphi=180,
-        scan_center=_last_axis_R, fail_residual_tol=1.0)
+        scan_center=_last_axis_R,
+        fail_residual_tol=p["rmax"] - p["rmin"])
     out["t_axis"] = time.perf_counter() - t0
     out["axis_count"] = len(axes)
     if not axes:
@@ -156,6 +161,25 @@ def _map_point(point: np.ndarray) -> dict:
         return out
     out["t_full"] = time.perf_counter() - t2
     out["full_feasible"] = True
+
+    # "Altitude" add-on: epsilon_eff^(3/2) for full-feasible samples, so the
+    # mapping doubles as a global search with objective values.  Same start
+    # point and (nturn, nphi) as the full trace; only the particle integral
+    # (npart) is additional cost.  nan when the integral fails.
+    if p.get("compute_eps", True):
+        try:
+            set_trace_parameters(
+                p["full_nturn"], p["full_nphi"], npart=p["full_npart"],
+                verbose=False)
+            gradpsi = compute_initial_gradpsi_nemov(
+                extcur, start_rz[0], start_rz[1], verbose=False)
+            eps_res = compute_epstot(
+                start_rz, initial_gradpsi=gradpsi,
+                return_fieldline=False, verbose=False)
+            eps_val = eps_res[0]
+            out["eps"] = float(eps_val) if eps_val is not None else np.nan
+        except Exception:
+            out["eps"] = np.nan
     return out
 
 
@@ -288,6 +312,8 @@ def map_feasible_islands(
     short_nphi: int = 72,
     full_nturn: int = 200,
     full_nphi: int = 360,
+    full_npart: int = 2000,
+    compute_eps: bool = True,
     smooth_n_harmonics: int = 4,
     smooth_residual_tol: float = 0.05,
     smooth_max_gap: float = 1.0,
@@ -319,7 +345,8 @@ def map_feasible_islands(
         delt_r=float(delt_r), rmin=float(rmin), rmax=float(rmax),
         rstep=float(rstep), short_nturn=int(short_nturn),
         short_nphi=int(short_nphi), full_nturn=int(full_nturn),
-        full_nphi=int(full_nphi),
+        full_nphi=int(full_nphi), full_npart=int(full_npart),
+        compute_eps=bool(compute_eps),
         smooth_n_harmonics=int(smooth_n_harmonics),
         smooth_residual_tol=float(smooth_residual_tol),
         smooth_max_gap=float(smooth_max_gap),
@@ -391,6 +418,7 @@ def map_feasible_islands(
     full_istate = np.full(n, -9999, dtype=np.int32)
     smooth_residual = np.full(n, np.nan, dtype=np.float64)
     smooth_max_gap = np.full(n, np.nan, dtype=np.float64)
+    eps = np.full(n, np.nan, dtype=np.float64)
 
     for k, r in enumerate(results):
         axis_feasible[k] = r["axis_feasible"]
@@ -402,6 +430,7 @@ def map_feasible_islands(
         full_istate[k] = r["full_istate"]
         smooth_residual[k] = r["smooth_residual"]
         smooth_max_gap[k] = r["smooth_max_gap"]
+        eps[k] = r.get("eps", np.nan)
 
     if do_cluster:
         islands, free_dims = _cluster_full_feasible(
@@ -424,6 +453,7 @@ def map_feasible_islands(
         "full_istate": full_istate,
         "smooth_residual": smooth_residual,
         "smooth_max_gap": smooth_max_gap,
+        "eps": eps,
         "free_dims": np.asarray(free_dims, dtype=int),
         "islands": islands,
         "params": params,
@@ -460,6 +490,8 @@ def save_island_mapping_h5(path: Path, res: dict):
         f.create_dataset("full_istate", data=res["full_istate"])
         f.create_dataset("smooth_residual", data=res["smooth_residual"])
         f.create_dataset("smooth_max_gap", data=res["smooth_max_gap"])
+        if "eps" in res:
+            f.create_dataset("eps", data=np.asarray(res["eps"], dtype=np.float64))
         if "free_dims" in res:
             f.create_dataset("free_dims", data=np.asarray(res["free_dims"], dtype=int))
 
@@ -491,6 +523,12 @@ def load_island_mapping_h5(path: Path) -> dict:
         res["full_istate"] = f["full_istate"][()]
         res["smooth_residual"] = f["smooth_residual"][()]
         res["smooth_max_gap"] = f["smooth_max_gap"][()]
+        if "eps" in f:
+            res["eps"] = f["eps"][()]
+        else:
+            # Old mapping files predate the "altitude" add-on.
+            res["eps"] = np.full(f["samples"].shape[0], np.nan,
+                                 dtype=np.float64)
         if "free_dims" in f:
             res["free_dims"] = f["free_dims"][()]
         else:

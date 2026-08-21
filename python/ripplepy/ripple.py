@@ -474,6 +474,32 @@ def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
     return None, None, None, False
 
 
+def _rank_by_residual(rs, z0, nphi):
+    """Rank R guesses by their one-turn return residual (ascending).
+
+    B1 residual-ordered scan helper: one 2-turn trace per guess (the one-turn
+    point is 0-based index nphi, as in `find_axis`).  Trace failures sort to
+    the end.  Used only to ORDER the attempts -- every guess is still tried in
+    the worst case, so axis-feasibility verdicts are unchanged.
+    """
+    scored = []
+    for r in rs:
+        guess = np.array([float(r), float(z0)], dtype=np.float64)
+        try:
+            fld, ist = trace_fieldline(initial_rz=guess, nturn=2, nphi=nphi,
+                                       verbose=False)
+        except Exception:
+            ist = -9999
+        if ist != 0:
+            scored.append((np.inf, float(r)))
+        else:
+            scored.append((float(np.hypot(fld[nphi, 0] - guess[0],
+                                          fld[nphi, 1] - guess[1])),
+                           float(r)))
+    scored.sort(key=lambda t: t[0])
+    return [r for _, r in scored]
+
+
 def find_axis_any(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
                   max_iter=100, delta_r=0.01, axis_z_tol=1e-6,
                   nphi=360, verbose=False, scan_center=None,
@@ -486,35 +512,56 @@ def find_axis_any(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
     (rmax-rmin)/rstep, because the scan stops after the first good R guess.
 
     scan_center : float, optional
-        P1a warm start.  When given, the R guesses in [rmin, rmax] are tried
-        in order of increasing |r - scan_center| (tie-break: smaller r) rather
-        than from rmin upward.  The window is unchanged -- only the attempt
-        order changes -- so nothing is missed when the warm guess fails.
+        P1a warm start.  When given, the guess nearest |r - scan_center| is
+        tried first with the full solver gate (fail_residual_tol >= 1.0, so
+        warm hits behave exactly as pre-P2); after it misses, the rest of the
+        window is ranked by one-turn residual (B1) and uses the caller's gate.
+        The window is unchanged -- only the attempt order changes.
     fail_residual_tol : float, optional
         Forwarded to `find_axis`: guesses whose best one-turn residual is
         above this threshold skip the solver entirely.
     """
-    axes = []
     rs = []
     r = float(rmin)
     while r <= float(rmax) + 1e-12:
         rs.append(r)
         r += float(rstep)
-    if scan_center is not None:
-        rs = sorted(rs, key=lambda rr: (abs(rr - scan_center), rr))
-    for r in rs:
+
+    def _try(r, fail_tol=None):
         guess = np.array([r, float(z0)], dtype=np.float64)
         try:
             axis_rz, _, _, ok = find_axis(
-                guess, xtol=xtol, max_iter=max_iter,
-                delta_r=delta_r, nphi=nphi, verbose=False,
-                fail_residual_tol=fail_residual_tol)
+                guess, xtol=xtol, max_iter=max_iter, delta_r=delta_r,
+                nphi=nphi, verbose=False,
+                fail_residual_tol=fail_tol)
         except Exception:
             axis_rz, ok = None, False
+        return axis_rz, ok
+
+    if scan_center is not None:
+        rs = sorted(rs, key=lambda rr: (abs(rr - scan_center), rr))
+        # Warm guess first with the full pre-P2 solver gate (1.0): restores the
+        # old dense-layer hit behaviour exactly (a warm guess with residual
+        # < 1.0 always gets the solver).  The residual-ranked tail uses the
+        # caller's tighter gate (0.35) to skip hopeless guesses.
+        warm_tol = fail_residual_tol
+        if warm_tol is not None and warm_tol < 1.0:
+            warm_tol = 1.0
+        axis_rz, ok = _try(rs[0], fail_tol=warm_tol)
         if ok and abs(axis_rz[1]) <= axis_z_tol:
-            axes.append((float(axis_rz[0]), float(axis_rz[1])))
-            break
-    return axes
+            return [(float(axis_rz[0]), float(axis_rz[1]))]
+        tail = _rank_by_residual(rs[1:], z0, nphi) if len(rs) > 1 else []
+        for r in tail:
+            axis_rz, ok = _try(r, fail_tol=fail_residual_tol)
+            if ok and abs(axis_rz[1]) <= axis_z_tol:
+                return [(float(axis_rz[0]), float(axis_rz[1]))]
+        return []
+    # No warm start: rank the whole window by residual.
+    for r in _rank_by_residual(rs, z0, nphi):
+        axis_rz, ok = _try(r, fail_tol=fail_residual_tol)
+        if ok and abs(axis_rz[1]) <= axis_z_tol:
+            return [(float(axis_rz[0]), float(axis_rz[1]))]
+    return []
 
 
 def find_axis_multi_guess(rmin, rmax, rstep, z0=0.0, xtol=1e-6,

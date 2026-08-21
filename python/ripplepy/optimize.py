@@ -1228,6 +1228,10 @@ class DifferentialEvolution:
 
             pct_invalid = invalid_solutions / self.cfg.n_pop * 100
             best_extcur = self.pop[best_idx]
+            if self.to_x is not None:
+                # PCA-frame search: the population member is a y-vector; show
+                # the physical currents it maps to.
+                best_extcur = self.to_x(best_extcur)
             best_axis = self._axes[best_idx]
             axis_r_str = f"{best_axis[0]:.4f}" if best_axis is not None else "n/a"
             logger.info(

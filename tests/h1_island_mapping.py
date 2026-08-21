@@ -42,16 +42,20 @@ ENGINEERING_BOUNDS = np.array([
 DELT_R_LIST = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
 
 # Phase 1 sampling budget (per layer)
-N_PRE_SURVEY = 4096        # first layer, low-res on engineering box
+N_PRE_SURVEY = 16384       # first layer, low-res on engineering box (island
+                           # discovery is the single point of failure: 4096
+                           # once missed the good-solution island entirely)
 N_DENSE_FIRST = 16384      # first layer, dense Sobol inside the q02/q98 box
 N_LOCAL_PER_ISLAND = 1000  # subsequent layers, per-island local samples
 N_GLOBAL = 200             # subsequent layers, global verification samples
 ALPHA = 1.5
 
 # Oracle parameters
-RMIN, RMAX, RSTEP = 1.00, 1.35, 0.05
+RMIN, RMAX, RSTEP = 0.95, 1.45, 0.05   # window widened: axes seen up to R=1.401
 SHORT_NTURN, SHORT_NPHI = 20, 72
 FULL_NTURN, FULL_NPHI = 200, 360
+FULL_NPART = 2000          # particle count for the eps "altitude" add-on
+COMPUTE_EPS = True         # compute eps_eff^(3/2) for full-feasible samples
 SMOOTH_N_HARMONICS = 4
 SMOOTH_RESIDUAL_TOL = 0.05
 SMOOTH_MAX_GAP = 1.0
@@ -70,12 +74,16 @@ def survey_first_bounds(cfg, dr, processes):
     )
 
     print("  first layer pre-survey on engineering box ...")
+    # compute_eps=False: the pre-survey's eps values are discarded (no HDF5 is
+    # written and the bounds only use full_feasible), so skip the particle
+    # integral there and save a few minutes.
     pre = map_islands(
         cfg, ENGINEERING_BOUNDS, dr,
         n_samples=N_PRE_SURVEY,
         rmin=RMIN, rmax=RMAX, rstep=RSTEP,
         short_nturn=SHORT_NTURN, short_nphi=SHORT_NPHI,
         full_nturn=FULL_NTURN, full_nphi=FULL_NPHI,
+        full_npart=FULL_NPART, compute_eps=False,
         smooth_n_harmonics=SMOOTH_N_HARMONICS,
         smooth_residual_tol=SMOOTH_RESIDUAL_TOL,
         smooth_max_gap=SMOOTH_MAX_GAP,
@@ -106,8 +114,7 @@ def main():
     args = parser.parse_args()
 
     global OUTPUT_ROOT, DELT_R_LIST, N_PRE_SURVEY, N_DENSE_FIRST
-    global N_LOCAL_PER_ISLAND, N_GLOBAL, SHORT_NTURN, SHORT_NPHI
-    global FULL_NTURN, FULL_NPHI, SMOOTH_MIN_POINTS, PROGRESS_INTERVAL
+    global N_LOCAL_PER_ISLAND, N_GLOBAL, SMOOTH_MIN_POINTS, PROGRESS_INTERVAL
 
     if args.smoke:
         OUTPUT_ROOT = BASE / "tests" / "h1_islands_smoke"
@@ -116,12 +123,14 @@ def main():
         N_DENSE_FIRST = 64
         N_LOCAL_PER_ISLAND = 16
         N_GLOBAL = 8
-        SHORT_NTURN, SHORT_NPHI = 5, 36
-        FULL_NTURN, FULL_NPHI = 20, 72
+        # nturn/nphi/npart intentionally match the real run (20/72, 200/360,
+        # npart=2000), so the smoke exercises the same oracle: axis + short +
+        # full + Poincare + eps.  Only the sample budgets are tiny.
         SMOOTH_MIN_POINTS = 8
         PROGRESS_INTERVAL = 8
         args.force = True
-        print("SMOKE MODE: tiny budgets, output -> tests/h1_islands_smoke")
+        print("SMOKE MODE: tiny budgets, full-res oracle, "
+              "output -> tests/h1_islands_smoke")
 
     from ripplepy import OptimizationConfig
     from ripplepy.islands import (
@@ -182,6 +191,7 @@ def main():
             rmin=RMIN, rmax=RMAX, rstep=RSTEP,
             short_nturn=SHORT_NTURN, short_nphi=SHORT_NPHI,
             full_nturn=FULL_NTURN, full_nphi=FULL_NPHI,
+            full_npart=FULL_NPART, compute_eps=COMPUTE_EPS,
             smooth_n_harmonics=SMOOTH_N_HARMONICS,
             smooth_residual_tol=SMOOTH_RESIDUAL_TOL,
             smooth_max_gap=SMOOTH_MAX_GAP,
@@ -201,6 +211,11 @@ def main():
         for isl in res["islands"]:
             print(f"    island {isl['island_id']}: n={isl['n_points']}, "
                   f"axis_R~{isl['mean_axis_R']:.4f}")
+
+        # Hot-start the next delt_r layer from this layer's islands (per-island
+        # local samples + a small global verification set).  Without this the
+        # next layer would re-run the full 16384-point dense mapping.
+        prev = res
 
     print("\nDone.")
 

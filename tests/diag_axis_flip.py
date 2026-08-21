@@ -4,14 +4,14 @@ Replicates the smoke pre-survey oracle (32 Sobol samples on the engineering
 box, seed=48) and compares:
   OLD path: find_axis_any(max_iter=100, no fail-fast, nphi=180) + a second
             full find_axis(nphi=360, xtol=1e-5) refinement, |Z| re-check.
-  NEW path: find_axis_any(max_iter=40, fail_residual_tol=0.1, nphi=180),
+  NEW path: find_axis_any(max_iter=100, fail_residual_tol=RMAX-RMIN, nphi=180),
             axis used directly.
 
 For each flipped sample it prints, per R grid point, whether the OLD solver
-succeeds, and attributes the NEW failure to fail-fast (trial residual > 0.1)
-vs maxfev (solver needs > 40 evals).  For old-axis samples lost by the new
-path it also runs the L2/L3 short+full traces to see whether a real
-full-feasible point is being missed.
+succeeds, and attributes the NEW failure to fail-fast (trial residual >
+RMAX-RMIN) vs maxfev.  For old-axis samples lost by the new path it also runs
+the L2/L3 short+full traces to see whether a real full-feasible point is being
+missed.
 
 Run:  PYTHONPATH=python python tests/diag_axis_flip.py
 """
@@ -67,7 +67,7 @@ def axis_new(point):
     set_extcur(point)
     axes = find_axis_any(RMIN, RMAX, RSTEP, z0=0.0, xtol=1e-6, max_iter=100,
                          delta_r=0.01, axis_z_tol=Z_TOL, nphi=180,
-                         scan_center=None, fail_residual_tol=1.0)
+                         scan_center=None, fail_residual_tol=RMAX - RMIN)
     if not axes:
         return None, "L1-no-axis"
     return np.asarray(axes[0]), "ok"
@@ -105,6 +105,8 @@ def main():
     n_old = n_new = 0
     flips = 0
     for k, pt in enumerate(samples):
+        if k % 4 == 0 or k == len(samples) - 1:
+            print(f"  sample {k + 1}/{len(samples)} ...", flush=True)
         a_old, s_old = axis_old(pt)
         a_new, s_new = axis_new(pt)
         old_ok, new_ok = a_old is not None, a_new is not None
@@ -126,10 +128,10 @@ def main():
                                         delta_r=0.01, nphi=180)
             _, _, _, ok_fast = find_axis(guess, xtol=1e-6, max_iter=100,
                                          delta_r=0.01, nphi=180,
-                                         fail_residual_tol=1.0)
+                                         fail_residual_tol=RMAX - RMIN)
             _, _, _, ok_new = find_axis(guess, xtol=1e-6, max_iter=100,
                                         delta_r=0.01, nphi=180,
-                                        fail_residual_tol=1.0)
+                                        fail_residual_tol=RMAX - RMIN)
             cause = "same" if ok_old == ok_new else (
                 "FAIL-FAST" if not ok_fast else "maxfev")
             print(f"  R={r:.2f}: old(hybr100)={'Y' if ok_old else 'n'} "

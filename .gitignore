@@ -1,60 +1,65 @@
+# ─────────────────────────────────────────────────────────────
+# ripplepy .gitignore
+# GitHub 只同步代码；服务器/本地生成的运行数据一律忽略。
+# ─────────────────────────────────────────────────────────────
+
 # Python
 __pycache__/
 *.py[cod]
-*.so
-*.pyd
-*.dylib
-*.dll
 *.egg-info/
+*.egg
 dist/
 build/
-*.egg
-*.pyc
 
-# Fortran
+# Fortran build artifacts
 *.mod
 *.o
 *.obj
 
-# CMake
+# CMake / scikit-build
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 Makefile
 *.cmake
+_skbuild/
+build_local/
 
-# IDE
+# Locally built Python package extension (generated, not committed)
+python/ripplepy/_effective_ripple*.so
+python/ripplepy/effective_ripple.py
+
+# Runtime logs / data / plots / CSVs (run outputs never sync to GitHub)
+*.log
+*.h5
+*.png
+*.csv
+
+# VMEC / parvmec stray outputs at the repo root only
+# (root-anchored: /for* would also match fortran/, so "for" is omitted;
+#  mgrid* would also match python/ripplepy/mgrid.py)
+/threed*
+/parvmec*
+/timing*
+/mgrid*
+/extcur*
+/log*
+/log_xgrid*
+
+# Test data and run-output directories (server-side data)
+tests/test_file/
+tests/h1_islands/
+tests/h1_islands_smoke/
+tests/h1_optimisation/
+tests/h1_island_optimisation/
+tests/fieldline_cache/
+
+# IDE / OS
 .vscode/
 .idea/
 *.swp
-
-# OS
 .DS_Store
 
-# Build directories
-build/
-build_local/
-python/ripplepy/_effective_ripple*.so
-python/ripplepy/effective_ripple.py
-fortran/*.mod
-fortran/pspline/*.mod
-
-# test
-tests/h1_optimisation/
-tests/test_file/
-tests/fieldline_cache/
-tests/*.png
-*.log
-mgrid*
-log_xgrid*
-extcur*
-for*
-log*
-threed*
-parvmec*
-timing*
-*.h5
-.png
+# Misc
 .reasonix/
 reasonix.toml
-_skbuild/*
