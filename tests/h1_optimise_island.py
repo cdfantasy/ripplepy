@@ -6,6 +6,26 @@ Edit the constants in the CONFIGURATION block below, then run:
     python tests/h1_optimise_island.py
 """
 
+# nohup env OMP_NUM_THREADS=1 python -u tests/h1_island_mapping.py --processes 64 \
+#     > tests/h1_islands/console.log 2>&1 &
+
+# echo $! > tests/h1_islands/pid.txt
+# echo "PID: $(cat tests/h1_islands/pid.txt)"
+
+# from ripplepy.islands import load_island_mapping_h5
+# from pathlib import Path
+
+# for p in sorted(Path('tests/h1_islands').glob('islands_dr*.h5')):
+#     r = load_island_mapping_h5(p)
+#     print(f"\n{r['delt_r']} : {p.name}")
+#     for isl in r['islands']:
+#         print(f"  island {isl['island_id']}: n={isl['n_points']}, "
+#               f"axis_R={isl['mean_axis_R']:.4f}")
+#         print("    bounds:")
+#         for i, (lo, hi) in enumerate(isl['bounds']):
+#             print(f"      coil {i}: [{lo:.1f}, {hi:.1f}]")
+
+
 from __future__ import annotations
 
 import logging
@@ -72,11 +92,14 @@ FULL_TORUS = False
 
 
 def make_run_dir() -> Path:
-    tag = "pca_" if USE_PCA else ""
-    tag += "_".join(
-        [f"dr{DELT_R:g}"]
-        + [f"{lo:.0f}_{hi:.0f}" for lo, hi in BOUNDS]
-    )
+    if USE_PCA:
+        # BOUNDS is unused in PCA mode; tag the folder with the frame instead.
+        tag = f"pca_dr{DELT_R:g}_isl{PCA_ISLAND_ID}_k{PCA_K:g}"
+    else:
+        tag = "_".join(
+            [f"dr{DELT_R:g}"]
+            + [f"{lo:.0f}_{hi:.0f}" for lo, hi in BOUNDS]
+        )
     base = OUTPUT_ROOT / tag
     candidate = base
     idx = 2
