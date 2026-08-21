@@ -33,7 +33,9 @@ Makefile
 
 # Build directories
 build/
+build_local/
 python/ripplepy/_effective_ripple*.so
+python/ripplepy/effective_ripple.py
 fortran/*.mod
 fortran/pspline/*.mod
 

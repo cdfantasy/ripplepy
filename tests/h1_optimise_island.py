@@ -52,6 +52,18 @@ VERIFY_NPHI = 720
 VERIFY_NPART = 5000
 MIN_MINOR_RADIUS = 0.02
 PROCESSES = None   # None -> all CPU cores; or set e.g. 64
+
+# PCA-frame DE (方案 A): when USE_PCA is True the manual BOUNDS above are
+# ignored.  The search box is built from the mapping HDF5 island's
+# center_free/cov_free: y-space = island principal axes, DE box =
+# [-k*sigma, +k*sigma] per axis, initial population uniform in that box.
+# Individuals are mapped back to absolute currents (coil 0 fixed) for every
+# evaluation via the de.to_x hook.
+USE_PCA = True
+PCA_H5 = BASE / "tests" / "h1_islands" / "islands_dr0.12.h5"
+PCA_ISLAND_ID = 0
+PCA_K = 3.0
+PCA_MIN_WIDTH = 0.02   # minimum half-width per axis (normalised units)
 # ═══════════════════════════════════════════════════════════════════════════
 
 NOMINAL_EXTCUR = np.array([50000.0, 5000.0, 3000.0, -80000.0, -40000.0])
@@ -60,7 +72,8 @@ FULL_TORUS = False
 
 
 def make_run_dir() -> Path:
-    tag = "_".join(
+    tag = "pca_" if USE_PCA else ""
+    tag += "_".join(
         [f"dr{DELT_R:g}"]
         + [f"{lo:.0f}_{hi:.0f}" for lo, hi in BOUNDS]
     )
@@ -105,6 +118,58 @@ def verify_full_res(extcur, label, initial_rz):
     return float(eps)
 
 
+def build_pca_frame(h5_path, island_id=0, k=3.0, min_width=0.02):
+    """Build a principal-axis (PCA) DE frame from a mapping HDF5 island.
+
+    Uses the island's center_free (centroid) + cov_free (shape/tilt) in
+    normalised free-coil space.  y-space = the island's own axes, DE box =
+    [-k*sigma, +k*sigma] per axis (uniform initial population = 方案 A).
+
+    Returns
+    -------
+    y_bounds   : (5,2) DE box in y-space (coil 0 locked at [50000, 50000])
+    to_x       : 5-vector y -> 5-vector absolute current x (coil 0 = 50000)
+    to_y       : 5-vector current x -> 5-vector y
+    mean_axis_R: island's mean magnetic axis R (fallback axis warm-start)
+    """
+    from ripplepy.islands import load_island_mapping_h5
+
+    res = load_island_mapping_h5(Path(h5_path))
+    bounds = np.asarray(res["bounds"], dtype=np.float64)
+    free = np.flatnonzero(bounds[:, 1] - bounds[:, 0] > 1e-12)
+    isl = res["islands"][island_id]
+    mu = np.asarray(isl["center_free"], dtype=np.float64)      # (n_free,)
+    cov = np.asarray(isl["cov_free"], dtype=np.float64)        # (n_free, n_free)
+    lo = bounds[free, 0]
+    span = bounds[free, 1] - bounds[free, 0]
+    span[span <= 1e-12] = 1.0
+
+    w, V = np.linalg.eigh(cov)                 # ascending eigenvalues
+    w, V = w[::-1], V[:, ::-1]                 # descending (principal axes)
+    sigma = np.sqrt(np.maximum(w, 0.0))
+    half = np.maximum(k * sigma, min_width)
+
+    y_bounds = np.array([[50000.0, 50000.0]] * 5, dtype=np.float64)
+    y_bounds[free, 0] = -half
+    y_bounds[free, 1] = +half
+
+    def to_x(y):
+        y = np.asarray(y, dtype=np.float64)
+        u = mu + V @ y[free]                   # normalised free coords
+        x = np.array([50000.0] * 5, dtype=np.float64)
+        x[free] = lo + u * span
+        return x
+
+    def to_y(x):
+        x = np.asarray(x, dtype=np.float64)
+        u = (x[free] - lo) / span
+        y = np.array([50000.0] * 5, dtype=np.float64)
+        y[free] = V.T @ (u - mu)
+        return y
+
+    return y_bounds, to_x, to_y, float(isl["mean_axis_R"])
+
+
 class Tee:
     """Mirror stdout/stderr to the console and a run log file."""
     def __init__(self, *streams):
@@ -139,10 +204,26 @@ def main():
     sys.stderr = Tee(_orig_stderr, console_log)
 
     print(f"Output -> {run_dir}")
-    print("Bounds:")
-    for i, (lo, hi) in enumerate(BOUNDS):
-        print(f"  coil {i}: [{lo:.1f}, {hi:.1f}]"
-              f"{'  (fixed)' if lo == hi else ''}")
+
+    # PCA frame first (needed for the axis warm-start guess when enabled).
+    pca_frame = None
+    if USE_PCA:
+        pca_frame = build_pca_frame(
+            PCA_H5, island_id=PCA_ISLAND_ID, k=PCA_K,
+            min_width=PCA_MIN_WIDTH)
+        y_bounds, to_x, to_y, mean_axis_R = pca_frame
+        initial_rz = np.array([mean_axis_R, 0.0], dtype=np.float64)
+        print(f"PCA frame from {PCA_H5} (island {PCA_ISLAND_ID}, "
+              f"k={PCA_K}, axis_R={mean_axis_R:.4f})")
+        for i, (lo, hi) in enumerate(y_bounds):
+            print(f"  y coil {i}: [{lo:.4f}, {hi:.4f}]"
+                  f"{'  (fixed)' if lo == hi else ''}")
+    else:
+        initial_rz = INITIAL_RZ
+        print("Bounds:")
+        for i, (lo, hi) in enumerate(BOUNDS):
+            print(f"  coil {i}: [{lo:.1f}, {hi:.1f}]"
+                  f"{'  (fixed)' if lo == hi else ''}")
 
     n_cores = int(PROCESSES) if PROCESSES else multiprocessing.cpu_count()
     print(f"Processes = {n_cores}\n")
@@ -156,7 +237,7 @@ def main():
         mgrid_path=str(MGRID_PATH),
         nfp=NFP,
         full_torus=FULL_TORUS,
-        initial_rz=INITIAL_RZ,
+        initial_rz=initial_rz,
         initial_bounds=NOMINAL_EXTCUR,
         nturn=DE_NTURN,
         nphi=DE_NPHI,
@@ -175,29 +256,34 @@ def main():
         patience=PATIENCE,
         seed=SEED,
         min_minor_radius=MIN_MINOR_RADIUS,
-        adapt_bounds=False,   # stay strictly inside the manual island box
+        adapt_bounds=False,   # stay strictly inside the search box
     )
-    # Override the symmetric config bounds by the manual absolute box.
-    cfg._abs_bounds = BOUNDS.copy()
+    # Override the symmetric config bounds: PCA y-box or the manual island box.
+    cfg._abs_bounds = y_bounds.copy() if USE_PCA else BOUNDS.copy()
 
     de = DifferentialEvolution(cfg)
+    if USE_PCA:
+        de.to_x = to_x   # DE searches y-space; every evaluation maps y -> x
     best_individual, best_fitness, all_infos = de.run()
 
+    best_x = to_x(best_individual) if USE_PCA else best_individual
     print(f"\nBest (DE): eps_eff^(3/2) = {best_fitness:.6e}")
-    for c, val in enumerate(best_individual):
+    for c, val in enumerate(best_x):
         print(f"  coil {c}: {val:10.1f} A")
+    if USE_PCA:
+        print(f"  (y-space: {np.round(best_individual, 4).tolist()})")
 
     # Full-resolution verification from the DE-recorded axis branch.
     best_axis = None
     for info in all_infos:
         if (info.get("axis_rz") is not None
-                and np.allclose(info.get("extcur"), best_individual)
+                and np.allclose(info.get("extcur"), best_x)
                 and abs(info.get("epsilon_eff", np.inf) - best_fitness) < 1e-12):
             best_axis = np.asarray(info["axis_rz"], dtype=np.float64)
             break
     if best_axis is None:
-        best_axis = INITIAL_RZ
-    verify_full_res(best_individual, "best    ", initial_rz=best_axis)
+        best_axis = initial_rz
+    verify_full_res(best_x, "best    ", initial_rz=best_axis)
 
     sys.stdout = _orig_stdout
     sys.stderr = _orig_stderr

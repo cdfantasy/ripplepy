@@ -30,7 +30,6 @@ from scipy.stats.qmc import Sobol
 from .optimize import OptimizationConfig
 from .ripple import (
     fieldline_smoothness_poincare,
-    find_axis,
     find_axis_any,
     initialize_mgrid_field,
     set_extcur,
@@ -40,6 +39,10 @@ from .ripple import (
 # Worker globals (set once per process by _worker_init)
 _worker_cfg: OptimizationConfig | None = None
 _worker_params: dict = {}
+# Per-worker P1a warm start: R of the axis found for the previous sample this
+# worker processed.  It only reorders the L1 R-scan (window unchanged), so a
+# stale or absent value costs a slightly slower scan, never a missed axis.
+_last_axis_R: Optional[float] = None
 
 
 def _n_workers(processes: int | None) -> int:
@@ -47,9 +50,10 @@ def _n_workers(processes: int | None) -> int:
 
 
 def _worker_init(cfg: OptimizationConfig, params: dict):
-    global _worker_cfg, _worker_params
+    global _worker_cfg, _worker_params, _last_axis_R
     _worker_cfg = cfg
     _worker_params = params
+    _last_axis_R = None
     # One worker prints one "Loaded mgrid" line; suppress it so large pools
     # do not flood the console log.
     with open(os.devnull, "w") as sink:
@@ -60,6 +64,7 @@ def _worker_init(cfg: OptimizationConfig, params: dict):
 
 def _map_point(point: np.ndarray) -> dict:
     """Run the full oracle cascade for one coil-current vector."""
+    global _last_axis_R
     cfg = _worker_cfg
     p = dict(_worker_params)
     extcur = np.asarray(point, dtype=np.float64)
@@ -82,38 +87,33 @@ def _map_point(point: np.ndarray) -> dict:
     set_extcur(extcur)
     t0 = time.perf_counter()
 
-    # L1: early-exit axis scan.  The first valid |Z|<=tol axis is enough;
-    # the selected axis is refined below with the full-resolution find_axis.
+    # L1: early-exit axis scan, warm-started from the axis R this worker found
+    # for its previous sample (P1a).  scan_center only reorders the guesses in
+    # the unchanged [rmin, rmax] window; the full window is still tried when
+    # the warm guess misses.  P2 fail-fast is kept conservative: full max_iter
+    # and fail_residual_tol=1.0 only skip guesses whose one-turn residual is
+    # hopeless (trace failed -> residual 1e10, or > 1 m drift), which the old
+    # solver burned maxfev on and still failed -- so axis-feasibility verdicts
+    # match the pre-P2 code (diagnostics showed hybr rescues residuals > 0.1).
     axes = find_axis_any(
         rmin=p["rmin"], rmax=p["rmax"], rstep=p["rstep"], z0=0.0,
         xtol=1e-6, max_iter=100, delta_r=0.01,
-        axis_z_tol=cfg.axis_z_tol, nphi=180)
+        axis_z_tol=cfg.axis_z_tol, nphi=180,
+        scan_center=_last_axis_R, fail_residual_tol=1.0)
     out["t_axis"] = time.perf_counter() - t0
     out["axis_count"] = len(axes)
     if not axes:
         return out
     out["axis_feasible"] = True
 
-    # Pick the first candidate that survives full-resolution refinement and
-    # use it for the trace.  No special multi-axis handling: the user already
-    # knows which current combinations are doublet/multi-axis cases.
-    chosen = None
-    for (Rc, Zc) in axes:
-        guess = np.array([Rc, Zc], dtype=np.float64)
-        try:
-            axis_rz, _, _, ok = find_axis(guess, xtol=1e-5, max_iter=100,
-                                          delta_r=0.01, nphi=360)
-        except Exception:
-            ok = False
-        if ok and abs(axis_rz[1]) <= cfg.axis_z_tol:
-            chosen = axis_rz
-            break
-
-    if chosen is None:
-        out["axis_feasible"] = False
-        return out
-    out["axis_used_RZ"] = np.asarray(chosen, dtype=np.float64)
-    axis_rz = out["axis_used_RZ"]
+    # L1 already converged to xtol=1e-6 at nphi=180 and passed the |Z|<=tol
+    # check, so use it directly (P1b: no second full-resolution find_axis).
+    # The axis only seeds the delt_r start point and the Poincare reference,
+    # where a ~1e-6 axis error is far below the delt_r and tolerance scales.
+    chosen = np.asarray(axes[0], dtype=np.float64)
+    _last_axis_R = float(axes[0][0])
+    out["axis_used_RZ"] = chosen
+    axis_rz = chosen
 
     start_rz = np.array([axis_rz[0] + p["delt_r"], axis_rz[1]],
                         dtype=np.float64, order="F")

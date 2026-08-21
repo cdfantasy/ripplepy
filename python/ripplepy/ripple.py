@@ -389,7 +389,7 @@ def compute_initial_gradpsi_nemov(extcur, R0, Z0, phi0=0.0, verbose=True):
 
 
 def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
-              verbose=False):
+              verbose=False, fail_residual_tol=None):
     """Find the magnetic axis by solving the one-turn return-map fixed point.
 
     Robustness improvements over a bare `root` call:
@@ -398,6 +398,13 @@ def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
       * if the best trial fails, the next-best trial is attempted (up to 3);
       * the final axis is re-traced and accepted only if it actually closes
         on itself to within a tolerance consistent with `xtol`.
+
+    fail_residual_tol : float, optional
+        P2 fail-fast gate.  When set, a guess whose best one-turn residual is
+        above this threshold returns failure immediately instead of starting
+        the solver.  A guess that far from closing cannot be rescued by hybr,
+        so skipping the solver turns a maxfev-burning failure into a few
+        cheap trial traces.  Default None keeps the original behaviour.
     """
     from scipy.optimize import root
     nphi = int(nphi)
@@ -440,6 +447,10 @@ def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
     # finite accuracy floor.
     accept_tol = max(1e-6, 10.0 * max(float(xtol), 1e-12))
 
+    if fail_residual_tol is not None and \
+            float(trial_results[0][0]) > float(fail_residual_tol):
+        return None, None, None, False
+
     for _, start_rz in trial_results[:3]:
         result = root(axis_residual, start_rz, method='hybr', tol=xtol,
                       options={'maxfev': max_iter, 'factor': 100})
@@ -465,28 +476,44 @@ def find_axis(initial_rz, xtol=1e-10, max_iter=200, delta_r=0.01, nphi=360,
 
 def find_axis_any(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
                   max_iter=100, delta_r=0.01, axis_z_tol=1e-6,
-                  nphi=360, verbose=False):
+                  nphi=360, verbose=False, scan_center=None,
+                  fail_residual_tol=None):
     """Scan R at fixed Z and return as soon as one valid axis is found.
 
     This is the early-exit version of `find_axis_multi_guess`, used when the
     caller does not care whether several axes exist.  In a box where most
     samples are axis-feasible it cuts the average axis-scan cost by roughly
     (rmax-rmin)/rstep, because the scan stops after the first good R guess.
+
+    scan_center : float, optional
+        P1a warm start.  When given, the R guesses in [rmin, rmax] are tried
+        in order of increasing |r - scan_center| (tie-break: smaller r) rather
+        than from rmin upward.  The window is unchanged -- only the attempt
+        order changes -- so nothing is missed when the warm guess fails.
+    fail_residual_tol : float, optional
+        Forwarded to `find_axis`: guesses whose best one-turn residual is
+        above this threshold skip the solver entirely.
     """
     axes = []
+    rs = []
     r = float(rmin)
     while r <= float(rmax) + 1e-12:
+        rs.append(r)
+        r += float(rstep)
+    if scan_center is not None:
+        rs = sorted(rs, key=lambda rr: (abs(rr - scan_center), rr))
+    for r in rs:
         guess = np.array([r, float(z0)], dtype=np.float64)
         try:
             axis_rz, _, _, ok = find_axis(
                 guess, xtol=xtol, max_iter=max_iter,
-                delta_r=delta_r, nphi=nphi, verbose=False)
+                delta_r=delta_r, nphi=nphi, verbose=False,
+                fail_residual_tol=fail_residual_tol)
         except Exception:
             axis_rz, ok = None, False
         if ok and abs(axis_rz[1]) <= axis_z_tol:
             axes.append((float(axis_rz[0]), float(axis_rz[1])))
             break
-        r += float(rstep)
     return axes
 
 

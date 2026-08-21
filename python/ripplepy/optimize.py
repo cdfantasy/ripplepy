@@ -1020,6 +1020,11 @@ class DifferentialEvolution:
         self.n_dim = len(config.initial_bounds)
         self.objective = StellaratorObjective(config)
 
+        # Optional coordinate transform (PCA-frame search): maps a search-space
+        # vector y to an absolute-current vector x, applied to every individual
+        # before evaluation.  None keeps the standard current-space search.
+        self.to_x = None
+
         # Population state
         self.pop: list[np.ndarray] = []
         self.fitnesses: list[float] = []
@@ -1448,6 +1453,8 @@ class DifferentialEvolution:
         if indices is None:
             indices = list(range(len(population)))
         evaluate_func = self.objective.evaluate
+        if self.to_x is not None:
+            population = [self.to_x(v) for v in population]
         if initial_rz_list is None:
             args = [(ind, gen, i) for i, ind in zip(indices, population)]
         else:
