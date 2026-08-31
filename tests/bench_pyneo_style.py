@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Benchmark: ripplepy vs pyneo for CFQS and H1."""
+"""Benchmark: ripplepy vs pyneo for CFQS and H1.
+
+Results are cached locally (tests/benchmark_results/) after the first run;
+plotting-only reruns read from disk and skip the physics (use --recompute
+to force a fresh calculation).
+"""
+import argparse
+
 import numpy as np, time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,11 +19,93 @@ from ripplepy import (
     compute_epstot, find_axis,
 )
 
+# Publication-quality plotting (headless-safe; call before importing pyplot)
+from ripplepy.plotting import setup_publication_style, save_figure, PUB_COLORS
+setup_publication_style()
+import matplotlib.pyplot as plt
+
+# Directory where computed benchmark results are cached locally, so that
+# re-running for plotting only does not recompute the physics.
+RESULT_DIR = Path(__file__).resolve().parent / "benchmark_results"
+
+
+def _result_paths(name):
+    """Return (npz, csv) paths for the cached results of ``name``."""
+    stem = RESULT_DIR / f"pyneo_style_{name}"
+    return stem.with_suffix(".npz"), stem.with_suffix(".csv")
+
+
+def _print_table(name, Radius, py_eps, ripplepy):
+    print(f"\n  {'R':>6s}  {'pyneo':>12s}  "
+          f"{'ripplepy':>12s}  {'new/py':>8s}")
+    print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8}")
+    for i in range(len(Radius)):
+        n = ripplepy[i] / py_eps[i] if py_eps[i] != 0 else np.nan
+        print(f"  {Radius[i]:6.3f}  {py_eps[i]:12.4e}  "
+              f"{ripplepy[i]:12.4e}  {n:8.4f}")
+
+
+def _save_results(name, Radius, py_eps, ripplepy, iota_at_s):
+    """Store computed benchmark results locally as npz (data) + csv (readable)."""
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    npz_path, csv_path = _result_paths(name)
+    py_ref = np.asarray(py_eps, dtype=np.float64)
+    py_arr = np.asarray(ripplepy, dtype=np.float64)
+    radius = np.asarray(Radius, dtype=np.float64)
+    iota = np.asarray(iota_at_s, dtype=np.float64)
+    ratio = np.where(py_ref != 0.0, py_arr / py_ref, np.nan)
+    np.savez(npz_path, Radius=radius, pyneo=py_ref, ripplepy=py_arr, iota=iota)
+    np.savetxt(
+        csv_path,
+        np.column_stack([radius, py_ref, py_arr, ratio, iota]),
+        header="R,pyneo,ripplepy,ratio_ripplepy_over_pyneo,iota",
+        fmt="%.8e", delimiter=",",
+    )
+    print(f"[cache] Results saved to {npz_path} and {csv_path}")
+
+
+def _plot_pyneo_style(name, Radius, py_eps, ripplepy):
+    """Publication-quality figure: ε_eff^(3/2)(R) for NEO vs ripplepy."""
+    R = np.asarray(Radius)
+    py = np.asarray(py_eps)
+    rp = np.asarray(ripplepy)
+
+    fig, ax = plt.subplots(figsize=(5.0, 3.4))
+    fig.suptitle(f"{name} — field-source-level benchmark")
+
+    ax.plot(R, py, "o-", color=PUB_COLORS["blue"], label="NEO (VMEC + Boozer)")
+    ax.plot(R, rp, "s--", color=PUB_COLORS["red"], label="ripplepy (mgrid vacuum)")
+    ax.set_yscale("log")
+    ax.set_xlabel(r"major radius $R$ (m)")
+    ax.set_ylabel(r"$\varepsilon_{\mathrm{eff}}^{3/2}$")
+    ax.legend(loc="best")
+
+    fig.tight_layout()
+    stem = RESULT_DIR / f"pyneo_style_{name}_benchmark"
+    save_figure(fig, str(stem))
+    print(f"[plot] Figure saved to {stem}.pdf / {stem}.png")
+    plt.close(fig)
+
 def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
-                  sur_idx, nturn, nphi, npart, full_torus=False,py_old = False):
+                  sur_idx, nturn, nphi, npart, full_torus=False,py_old = False,
+                  recompute=False):
     print(f"\n{'='*60}")
     print(f"  {name}")
     print(f"{'='*60}")
+
+    # Plotting-only rerun: load cached results and skip the physics.
+    if not recompute:
+        npz_path, _ = _result_paths(name)
+        if npz_path.exists():
+            d = np.load(npz_path)
+            print(f"[cache] Loading results from {npz_path} "
+                  f"(use --recompute to rerun)")
+            Radius = d["Radius"]
+            py_eps = list(d["pyneo"])
+            ripplepy = list(d["ripplepy"])
+            _print_table(name, Radius, py_eps, ripplepy)
+            _plot_pyneo_style(name, Radius, py_eps, ripplepy)
+            return py_eps, ripplepy
     
     vmec = Vmec(str(vmec_path))
     R0_vmec = float(vmec.wout.Rmajor_p)
@@ -137,50 +226,45 @@ def run_benchmark(name, vmec_path,boozer_path, mgrid_path, extcur, nfp,
     # ── ripplepy (new pyneo-style) ──
 
     else:
-        print(f"\n  {'R':>6s}  {'pyneo':>12s}  "
-            f"{'ripplepy':>12s}  {'new/py':>8s}")
-        print(f"  {'-'*6}  {'-'*12}  {'-'*12}  {'-'*8}")
-        for i in range(len(sur_idx)):
-            n = ripplepy[i] / py_eps[i] if py_eps[i] != 0 else np.nan
-            print(f"  {Radius[i]:6.3f}  {py_eps[i]:12.4e}  "
-                f"{ripplepy[i]:12.4e}  {n:8.4f}")        
-    # plot
-        from matplotlib import pyplot as plt
-        fig, ax1 = plt.subplots(figsize=(9, 6))
-        ax1.plot(Radius, py_eps, 'o-', label='pyneo')
-        ax1.plot(Radius, ripplepy, 'x-', label='ripplepy (new pyneo-style)')
-        ax1.set_xlabel('R'); ax1.set_ylabel('eps_tot', color='C0')
-        ax1.set_title(f"{name} Benchmark: eps_tot vs R")
-        ax1.grid(True)
-        ax2 = ax1.twinx()
-        ax2.plot(Radius, iota_at_s, 's--', color='C2', label='iota (VMEC)')
-        ax2.set_ylabel('iota', color='C2')
-        ax2.tick_params(axis='y', labelcolor='C2')
-        lines = ax1.get_lines() + ax2.get_lines()
-        ax1.legend(lines, [l.get_label() for l in lines], loc='best')
-        fig.tight_layout(); plt.show()
-
-        
+        _print_table(name, Radius, py_eps, ripplepy)
+        _save_results(name, Radius, py_eps, ripplepy, iota_at_s)
+        _plot_pyneo_style(name, Radius, py_eps, ripplepy)
         return py_eps, ripplepy
 
 
 BASE = str(Path(__file__).resolve().parent.parent)
+
+
+def _parse_args():
+    parser = argparse.ArgumentParser(
+        description="Field-source-level benchmark: ripplepy (mgrid vacuum field) "
+                    "vs pyneo (VMEC + Boozer) for the same configuration. Results "
+                    "are cached locally after the first run; plotting-only reruns "
+                    "read from disk.")
+    parser.add_argument("--recompute", action="store_true",
+                        help="recompute the physics instead of loading cached results")
+    return parser.parse_args()
+
+
+ARGS = _parse_args()
+
 
 # ═══════════════════════════════════════════════════════════════
 # w7x
 # ═══════════════════════════════════════════════════════════════
 
 
-run_benchmark(
-    "w7x",
-    f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
-    f"{BASE}/tests/test_file/w7x_boozmn.nc",
-    f"{BASE}/tests/test_file/mgrid_w7-x.nc",
-    None, 5,
-    np.linspace(0.1, 1, 11),
-    nturn=400, nphi=360, npart=5000,
-    full_torus=False,
-)
+# run_benchmark(
+#     "w7x",
+#     f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc",
+#     f"{BASE}/tests/test_file/w7x_boozmn.nc",
+#     f"{BASE}/tests/test_file/mgrid_w7-x.nc",
+#     None, 5,
+#     np.linspace(0.1, 1, 11),
+#     nturn=400, nphi=360, npart=5000,
+#     full_torus=False,
+#     recompute=ARGS.recompute,
+# )
 
 # ═══════════════════════════════════════════════════════════════
 # CFQS
@@ -196,18 +280,20 @@ run_benchmark(
 #     np.linspace(0.1, 1, 11),
 #     nturn=400, nphi=360, npart=5000,
 #     full_torus=False,
+#     recompute=ARGS.recompute,
 # )
 
 # ═══════════════════════════════════════════════════════════════
 # H1
 # ═══════════════════════════════════════════════════════════════
-# run_benchmark(
-#     "H1",
-#     f"{BASE}/tests/test_file/wout_h1_design.nc",
-#     f"{BASE}/tests/test_file/h1_boozmn.nc",
-#     f"{BASE}/tests/test_file/mgrid_h1_design.nc",
-#     [50000, 5000, 0, -80000, -40000], 3,
-#     np.linspace(0.1, 1, 11),
-#     nturn=400, nphi=360, npart=5000,
-#     full_torus=False,
-# )
+run_benchmark(
+    "H1",
+    f"{BASE}/tests/test_file/wout_h1_design.nc",
+    f"{BASE}/tests/test_file/h1_boozmn.nc",
+    f"{BASE}/tests/test_file/mgrid_h1_design.nc",
+    [50000, 5000, 0, -80000, -40000], 3,
+    np.linspace(0.1, 1, 11),
+    nturn=400, nphi=360, npart=5000,
+    full_torus=False,
+    recompute=ARGS.recompute,
+)

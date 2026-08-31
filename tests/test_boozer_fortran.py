@@ -11,6 +11,8 @@ without any grid interpolation or field-line tracing.
 Set CACHE_FIELDLINE = True to skip Fourier summation on reruns.
 """
 
+import argparse
+
 import numpy as np
 from pathlib import Path
 from simsopt.mhd import Boozer, Vmec
@@ -22,7 +24,16 @@ from ripplepy.boozer_eps_verify import (
 )
 from ripplepy.ripple import Effective_Ripple, set_trace_parameters
 
+# Publication-quality plotting (headless-safe; call before importing pyplot)
+from ripplepy.plotting import setup_publication_style, save_figure, PUB_COLORS
+setup_publication_style()
+import matplotlib.pyplot as plt
+
 BASE = str(Path(__file__).resolve().parent.parent)
+
+# Directory where computed benchmark results are cached locally, so that
+# re-running for plotting only does not recompute the physics.
+RESULT_DIR = Path(__file__).resolve().parent / "benchmark_results"
 
 # ═══════════════════════════════════════════════
 # Configuration
@@ -31,11 +42,11 @@ BASE = str(Path(__file__).resolve().parent.parent)
 # DEVICE = "CFQS"
 # VMEC_PATH = f"{BASE}/tests/test_file/wout_cfqs_test_m10_n5_fixed.nc"
 
-# DEVICE = "H1"
-# VMEC_PATH = f"{BASE}/tests/test_file/wout_h1_design.nc"
+DEVICE = "H1"
+VMEC_PATH = f"{BASE}/tests/test_file/wout_h1_design.nc"
 
-DEVICE = "w7x"
-VMEC_PATH = f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc"
+# DEVICE = "w7x"
+# VMEC_PATH = f"{BASE}/tests/test_file/wout_w7x_test_m10_n5_fixed.nc"
 
 SURF_IDX_LIST = np.linspace(0.1, 1.0, 10)
 NTURN = 400
@@ -111,10 +122,103 @@ def build_fieldline_from_boozer(booz_dict, surf_idx, theta0, nzeta, nturn, phi0=
     return fld, geocur
 
 # ═══════════════════════════════════════════════
+# Result caching (compute once, plot from disk)
+# ═══════════════════════════════════════════════
+
+def _result_paths(device):
+    """Return (npz, csv) paths for the cached results of ``device``."""
+    stem = RESULT_DIR / f"boozer_fortran_{device}"
+    return stem.with_suffix(".npz"), stem.with_suffix(".csv")
+
+
+def _load_results(device):
+    """Load cached results, or return None if not cached."""
+    npz_path, _ = _result_paths(device)
+    if not npz_path.exists():
+        return None
+    print(f"[cache] Loading results from {npz_path} (use --recompute to rerun)")
+    return np.load(npz_path)
+
+
+def _save_results(device, s_vals, py_eps, eps_bf, R0, meta):
+    """Store computed benchmark results locally as npz (data) + csv (readable)."""
+    RESULT_DIR.mkdir(parents=True, exist_ok=True)
+    npz_path, csv_path = _result_paths(device)
+    np.savez(
+        npz_path,
+        s=np.asarray(s_vals, dtype=np.float64),
+        pyneo=np.asarray(py_eps, dtype=np.float64),
+        ripplepy=np.asarray(eps_bf, dtype=np.float64),
+        R0=float(R0),
+        **meta,
+    )
+    ratio = np.asarray(eps_bf) / np.asarray(py_eps)
+    np.savetxt(
+        csv_path,
+        np.column_stack([s_vals, py_eps, eps_bf, ratio]),
+        header="s,pyneo,boozer_ripplepy,ratio_ripplepy_over_pyneo",
+        fmt="%.8e", delimiter=",",
+    )
+    print(f"[cache] Results saved to {npz_path} and {csv_path}")
+
+
+def _plot_boozer_benchmark(device, s_vals, py_eps, eps_bf):
+    """Publication-quality figure: ε_eff^(3/2)(s) for NEO vs ripplepy."""
+    s = np.asarray(s_vals)
+    py = np.asarray(py_eps)
+    rp = np.asarray(eps_bf)
+
+    fig, ax = plt.subplots(figsize=(5.0, 3.4))
+    fig.suptitle(f"{device} — algorithm-level benchmark")
+
+    ax.plot(s, py, "o-", color=PUB_COLORS["blue"], label="NEO")
+    ax.plot(s, rp, "s--", color=PUB_COLORS["red"], label="ripplepy (Boozer field)")
+    ax.set_yscale("log")
+    ax.set_xlabel(r"normalised toroidal flux $s$")
+    ax.set_ylabel(r"$\varepsilon_{\mathrm{eff}}^{3/2}$")
+    ax.legend(loc="best")
+
+    fig.tight_layout()
+    stem = RESULT_DIR / f"boozer_fortran_{device}_benchmark"
+    save_figure(fig, str(stem))
+    print(f"[plot] Figure saved to {stem}.pdf / {stem}.png")
+    plt.close(fig)
+
+
+# ═══════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="Algorithm-level benchmark: the same Boozer-coordinate field "
+                    "in pyneo (native) and ripplepy (Boozer harmonics → Fortran "
+                    "η-state machine). Results are cached locally after the first "
+                    "run; plotting-only reruns read from disk.")
+    parser.add_argument("--recompute", action="store_true",
+                        help="recompute the physics instead of loading cached results")
+    args = parser.parse_args()
+
+    cached = None if args.recompute else _load_results(DEVICE)
+    if cached is not None:
+        s_vals = cached["s"]
+        py_eps = list(cached["pyneo"])
+        eps_bf = list(cached["ripplepy"])
+        R0 = float(cached["R0"])
+        eps_bp = [np.nan] * len(s_vals)
+        print(f"\n  {'─'*60}")
+        print(f"  {DEVICE} — ε_eff^(3/2) comparison (from cache)")
+        print(f"  {'─'*60}")
+        print(f"  {'s':>8s}  {'pyneo':>12s}  {'booz-ripplepy':>12s}  {'f90/pyneo':>8s}")
+        print(f"  {'─'*8}  {'─'*12}  {'─'*12}  {'─'*8}")
+        for i, s_val in enumerate(s_vals):
+            r_f90 = eps_bf[i] / py_eps[i]
+            print(f"  {s_val:8.3f}  {py_eps[i]:12.4e}  "
+                  f"{eps_bf[i]:12.4e}  {r_f90:8.4f}")
+        print()
+        _plot_boozer_benchmark(DEVICE, s_vals, py_eps, eps_bf)
+        return
+
     print(f"\n{'='*60}")
     print(f"  {DEVICE} — Boozer → Fortran ε_eff")
     print(f"{'='*60}")
@@ -201,6 +305,12 @@ def main():
             print(f"  {s_val:8.3f}  {py_eps[i]:12.4e}  "
                   f"{eps_bf[i]:12.4e}  {r_f90:8.4f}")
     print()
+
+    # Cache results locally so that plotting-only reruns skip the physics.
+    _save_results(DEVICE, SURF_IDX_LIST, py_eps, eps_bf, R0,
+                  dict(nturn=NTURN, nphi_f90=NPHI_F90, npart=NPART,
+                       nstep_per=NSTEP_PER))
+    _plot_boozer_benchmark(DEVICE, SURF_IDX_LIST, py_eps, eps_bf)
 
 if __name__ == "__main__":
     main()

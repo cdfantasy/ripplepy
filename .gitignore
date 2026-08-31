@@ -53,6 +53,9 @@ tests/h1_islands_smoke/
 tests/h1_optimisation/
 tests/h1_island_optimisation/
 tests/fieldline_cache/
+tests/benchmark_results/
+poster/*
+
 
 # IDE / OS
 .vscode/

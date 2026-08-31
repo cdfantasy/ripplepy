@@ -41,13 +41,14 @@ ENGINEERING_BOUNDS = np.array([
 
 DELT_R_LIST = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
 
-# Phase 1 sampling budget (per layer)
-N_PRE_SURVEY = 16384       # first layer, low-res on engineering box (island
-                           # discovery is the single point of failure: 4096
-                           # once missed the good-solution island entirely)
-N_DENSE_FIRST = 16384      # first layer, dense Sobol inside the q02/q98 box
-N_LOCAL_PER_ISLAND = 1000  # subsequent layers, per-island local samples
-N_GLOBAL = 200             # subsequent layers, global verification samples
+# Phase 1 sampling budget (per layer) — overnight scenario B (max discovery)
+N_PRE_SURVEY = 65536       # first layer on the engineering box: 4D, 16 pts/dim
+                           # (4096 = 8 pts/dim once missed the good-solution
+                           # island entirely — the pre-survey is the single
+                           # point of failure for island discovery)
+N_DENSE_FIRST = 65536      # first layer, dense Sobol inside the q02/q98 sea
+N_LOCAL_PER_ISLAND = 3000  # subsequent layers, per-island local samples
+N_GLOBAL = 1000            # subsequent layers, global verification samples
 ALPHA = 1.5
 
 # Oracle parameters

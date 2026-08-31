@@ -12,66 +12,15 @@ Usage
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-import matplotlib.ticker as ticker
 import numpy as np
 import csv
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 0. 出版级全局样式
-# ═══════════════════════════════════════════════════════════════════════════
-
-def set_publication_style():
-    """Configure matplotlib rcParams for publication-quality output."""
-    plt.rcParams.update({
-        # ── 字体 ──
-        'font.family': 'serif',
-        'font.size': 13,
-        'axes.labelsize': 15,
-        'axes.titlesize': 15,
-        'xtick.labelsize': 12,
-        'ytick.labelsize': 12,
-        'legend.fontsize': 11,
-        # ── 线条 / 标记 ──
-        'lines.linewidth': 1.4,
-        'lines.markersize': 7,
-        'lines.markeredgewidth': 0.6,
-        # ── 刻度 ──
-        'xtick.direction': 'in',
-        'ytick.direction': 'in',
-        'xtick.major.size': 4.5,
-        'ytick.major.size': 4.5,
-        'xtick.major.width': 1.0,
-        'ytick.major.width': 1.0,
-        'xtick.minor.size': 2.5,
-        'ytick.minor.size': 2.5,
-        'xtick.minor.width': 0.7,
-        'xtick.top': True,
-        'ytick.right': True,
-        # ── 坐标轴 ──
-        'axes.linewidth': 1.1,
-        'axes.grid': True,
-        'grid.alpha': 0.25,
-        'grid.linewidth': 0.5,
-        'grid.linestyle': '--',
-        # ── 图例 ──
-        'legend.frameon': True,
-        'legend.framealpha': 0.85,
-        'legend.edgecolor': '#cccccc',
-        'legend.fancybox': False,
-        # ── 输出 ──
-        'savefig.dpi': 300,
-        'savefig.bbox': 'tight',
-        'savefig.pad_inches': 0.08,
-        # ── LaTeX ──
-        'text.usetex': False,
-        'mathtext.fontset': 'stix',
-    })
-
-
-set_publication_style()
+# Publication-quality plotting (headless-safe; call before importing pyplot)
+from ripplepy.plotting import setup_publication_style, save_figure, PUB_COLORS
+setup_publication_style()
+import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.ticker as ticker
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -110,6 +59,33 @@ def is_valid_entry(entry):
         return failure_flag.lower() in ('none', 'false', '')
     # 如果是布尔值
     return not bool(failure_flag)
+
+
+def find_global_best(data, generations, best_key='epsilon_eff'):
+    """Return (gen, ind, value, extcur) of the overall minimum valid individual."""
+    best = None
+    for gen in generations:
+        for ind, entry in data[gen].items():
+            if not is_valid_entry(entry):
+                continue
+            v = entry.get(best_key, float('nan'))
+            if np.isfinite(v) and (best is None or v < best[2]):
+                best = (gen, ind, v, entry.get('extcur', []))
+    return best
+
+
+def mark_global_best(ax, x, y, value=None):
+    """Highlight the global-best individual with a large red star + label."""
+    if value is None:
+        value = y
+    ax.scatter([x], [y], s=320, marker='*',
+               facecolor=PUB_COLORS['red'], edgecolors='#111111',
+               linewidths=1.2, zorder=10, label='Global best')
+    ax.annotate('%.2e' % value, xy=(x, y), xytext=(14, 14),
+                textcoords='offset points', fontsize=11, fontweight='bold',
+                color=PUB_COLORS['red'],
+                arrowprops=dict(arrowstyle='->', color=PUB_COLORS['red'],
+                                lw=1.2))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -201,10 +177,11 @@ def plot_generation_vs_quantity(
     generations,
     y_key='epsilon_eff',
     log_scale=None,
-    figsize=(14, 10),
+    figsize=(8, 6),
     title=None,
     output=None,
     cmap='viridis',
+    global_best=None,
 ):
     """Plot 1: 横轴 = Generation，纵轴 = 物理量，颜色表示代数"""
     if log_scale is None:
@@ -252,9 +229,15 @@ def plot_generation_vs_quantity(
     if start_data is not None and is_valid_entry(start_data):
         start_x = generations[0] - 1 if generations else -1
         ax.scatter([start_x], [start_data[y_key]], s=100, marker='D',
-                   facecolor='#333333', edgecolors='#111111',
+                   facecolor=PUB_COLORS["black"], edgecolors='#111111',
                    linewidths=1.0, zorder=7, label='Start')
         ax.axvline(x=-0.5, color='#aaaaaa', linewidth=0.6, linestyle=':')
+
+    # Global-best marker (highlight the overall optimum)
+    if global_best is not None:
+        gb_gen, gb_ind, gb_val, _ = global_best
+        mark_global_best(ax, gb_gen, gb_val)
+        ax.legend(loc='best')
 
     if log_scale:
         ax.set_yscale('log')
@@ -277,7 +260,7 @@ def plot_generation_vs_quantity(
     cbar.outline.set_linewidth(0.8)
 
     if output:
-        fig.savefig(output, dpi=300, bbox_inches='tight')
+        save_figure(fig, str(output))
     else:
         plt.show()
     plt.close(fig)
@@ -296,10 +279,11 @@ def plot_quantity_vs_quantity(
     best_mode='min',
     log_x=False,
     log_y=None,
-    figsize=(14, 10),
+    figsize=(8, 6),
     title=None,
     output=None,
     cmap='viridis',
+    global_best=None,
 ):
     """Plot 2: 物理量 vs 物理量，颜色表示代数"""
     if log_y is None:
@@ -349,8 +333,16 @@ def plot_quantity_vs_quantity(
         sy = start_entry.get(y_key, float('nan'))
         if np.isfinite(sx) and np.isfinite(sy):
             ax.scatter([sx], [sy], s=100, marker='D',
-                      facecolor='#333333', edgecolors='#111111',
+                      facecolor=PUB_COLORS["black"], edgecolors='#111111',
                       linewidths=0.5, zorder=8, label='Start')
+
+    # Global-best marker (highlight the overall optimum)
+    if global_best is not None:
+        gb_gen, gb_ind, gb_val, _ = global_best
+        gb_x = data[gb_gen][gb_ind].get(x_key, float('nan'))
+        if np.isfinite(gb_x) and np.isfinite(gb_val):
+            mark_global_best(ax, gb_x, gb_val)
+            ax.legend(loc='best')
 
     if log_x:
         ax.set_xscale('log')
@@ -374,7 +366,7 @@ def plot_quantity_vs_quantity(
     cbar.outline.set_linewidth(0.8)
 
     if output:
-        fig.savefig(output, dpi=300, bbox_inches='tight')
+        save_figure(fig, str(output))
     else:
         plt.show()
     plt.close(fig)
@@ -393,8 +385,14 @@ def plot_coils_vs_epsilon(
     output=None,
     cmap='viridis',
     max_coils_per_row=5,
+    skip_coils=(0,),
+    global_best=None,
 ):
-    """分面散点图：每个线圈 vs ε_eff，颜色表示代数"""
+    """分面散点图：每个线圈 vs ε_eff，颜色表示代数.
+
+    ``skip_coils``: 索引列表，跳过固定（不参与优化）的线圈，默认跳过
+    Coil 0（本次优化中第一个线圈被 fix）。
+    """
     # 动态检测线圈数量
     n_coils = None
     for gen in generations:
@@ -405,36 +403,38 @@ def plot_coils_vs_epsilon(
                 break
         if n_coils is not None:
             break
-    
+
     if n_coils is None:
         print("Error: No valid extcur data found")
         return
-    
-    print(f"Detected {n_coils} coils")
-    
+
+    plot_coils = [c for c in range(n_coils) if c not in skip_coils]
+    print(f"Detected {n_coils} coils; plotting {len(plot_coils)} "
+          f"(skipping fixed coils: {sorted(set(skip_coils))})")
+
     # 动态计算图形尺寸
     if figsize is None:
-        n_rows = (n_coils + max_coils_per_row - 1) // max_coils_per_row
-        n_cols = min(n_coils, max_coils_per_row)
-        figsize = (n_cols * 4.5, n_rows * 4.0)
-    
+        n_rows = (len(plot_coils) + max_coils_per_row - 1) // max_coils_per_row
+        n_cols = min(len(plot_coils), max_coils_per_row)
+        figsize = (n_cols * 3.4, n_rows * 3.2)
+
     norm = plt.Normalize(vmin=min(generations), vmax=max(generations))
     cmap_obj = plt.get_cmap(cmap)
-    
-    n_rows = (n_coils + max_coils_per_row - 1) // max_coils_per_row
-    n_cols = min(n_coils, max_coils_per_row)
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, 
+
+    n_rows = (len(plot_coils) + max_coils_per_row - 1) // max_coils_per_row
+    n_cols = min(len(plot_coils), max_coils_per_row)
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize,
                             sharey=True, squeeze=False)
     axes = axes.flatten()
-    
+
     # 隐藏多余的子图
-    for idx in range(n_coils, len(axes)):
+    for idx in range(len(plot_coils), len(axes)):
         axes[idx].set_visible(False)
-    
-    for ci in range(n_coils):
-        ax = axes[ci]
-        
+
+    for k, ci in enumerate(plot_coils):
+        ax = axes[k]
+
         # 收集该线圈的数据范围（只包含有效个体）
         all_vals = []
         for gen in generations:
@@ -444,60 +444,60 @@ def plot_coils_vs_epsilon(
                 extcur = entry.get('extcur', [])
                 if ci < len(extcur):
                     all_vals.append(extcur[ci])
-        
+
         if all_vals:
             margin = (max(all_vals) - min(all_vals)) * 0.1 or abs(max(all_vals)) * 0.05
             ax.set_xlim(min(all_vals) - margin, max(all_vals) + margin)
-        
+
         # 绘图
         for gen in generations:
             gen_color = cmap_obj(norm(gen))
-            
+
             # 获取有效个体（只根据 failure_flag 过滤）
             valid_entries = {
                 ind: entry for ind, entry in data[gen].items()
                 if is_valid_entry(entry)
             }
-            
+
             if not valid_entries:
                 continue
-            
+
             best_idx = min(valid_entries.keys(),
                           key=lambda i: valid_entries[i].get(best_key, float('inf')))
-            
+
             xs, ys = [], []
             for ind, entry in valid_entries.items():
                 extcur = entry.get('extcur', [])
                 if ci >= len(extcur):
                     continue
-                    
+
                 coil_val = extcur[ci]
                 eps = entry.get(best_key, float('nan'))
-                
+
                 if not np.isfinite(eps):
                     continue
-                    
+
                 xs.append(coil_val)
                 ys.append(eps)
-                
+
                 if ind == best_idx:
                     ax.scatter([coil_val], [eps], s=140, marker='*',
                               facecolor=gen_color, edgecolors='#222222',
                               linewidths=0.8, zorder=6)
-            
+
             if xs:
                 ax.scatter(xs, ys, s=28, marker='o',
                           facecolor=gen_color, edgecolors='white',
                           linewidths=0.4, alpha=0.7, zorder=4)
-        
+
         coil_labels = [f'Coil {i}' for i in range(n_coils)]
         ax.set_xlabel(coil_labels[ci] + '  [A]')
         ax.ticklabel_format(style='scientific', axis='x', scilimits=(-2, 4))
-        if ci % n_cols == 0:
+        if k % n_cols == 0:
             ax.set_ylabel(QUANTITY_LABELS.get(best_key, best_key))
         ax.set_yscale('log')
         ax.grid(True, alpha=0.25, linestyle='--', linewidth=0.5)
-        
+
         # Start marker
         start_entry = data.get('start', {}).get(0)
         if start_entry is not None and is_valid_entry(start_entry):
@@ -507,29 +507,35 @@ def plot_coils_vs_epsilon(
                 se = start_entry.get(best_key, float('nan'))
                 if np.isfinite(se):
                     ax.scatter([sc], [se], s=100, marker='D',
-                              facecolor='#333333', edgecolors='#111111',
+                              facecolor=PUB_COLORS["black"], edgecolors='#111111',
                               linewidths=0.5, zorder=8, label='Start' if ci == 0 else "")
-    
+
+        # Global-best marker (highlight the overall optimum on each coil panel)
+        if global_best is not None:
+            gb_gen, gb_ind, gb_val, gb_extcur = global_best
+            if ci < len(gb_extcur):
+                mark_global_best(ax, gb_extcur[ci], gb_val)
+
     fig.subplots_adjust(right=0.88, hspace=0.3, wspace=0.25)
-    
+
     sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm)
     sm.set_array([])
-    cbar = fig.colorbar(sm, ax=axes[:n_coils].tolist(), 
+    cbar = fig.colorbar(sm, ax=axes[:len(plot_coils)].tolist(),
                        fraction=0.02, pad=0.02)
     cbar.set_label('Generation', fontsize=12)
     cbar.ax.tick_params(labelsize=11)
     cbar.outline.set_linewidth(0.8)
-    
+
     # 如果有start，添加图例
     if start_entry is not None and is_valid_entry(start_entry):
         handles, labels = axes[0].get_legend_handles_labels()
         if handles:
-            fig.legend(handles, labels, 
+            fig.legend(handles, labels,
                       loc='upper right', bbox_to_anchor=(0.98, 0.98),
                       frameon=True, framealpha=0.85)
 
     if output:
-        fig.savefig(output, dpi=300, bbox_inches='tight')
+        save_figure(fig, str(output))
     else:
         plt.show()
     plt.close(fig)
@@ -585,16 +591,22 @@ if __name__ == '__main__':
     print(f'Loaded {len(generations)} generation(s), max individual = {max_ind}')
     
     cmap_choice = 'viridis'
-    
+
+    global_best = find_global_best(data, generations)
+    if global_best is not None:
+        print(f"Global best: ε_eff^(3/2) = {global_best[2]:.6e} "
+              f"(gen {global_best[0]}, ind {global_best[1]})")
+
     # Plot 1
     plot_generation_vs_quantity(
         data, generations, y_key='epsilon_eff',
-        output=run_dir / 'ripple_generation.png',
+        output=run_dir / 'ripple_generation',
         cmap=cmap_choice,
+        global_best=global_best,
     )
     plot_generation_vs_quantity(
         data, generations, y_key='iota',
-        output=run_dir / 'iota_generation.png',
+        output=run_dir / 'iota_generation',
         cmap=cmap_choice,
     )
 
@@ -602,19 +614,22 @@ if __name__ == '__main__':
     plot_quantity_vs_quantity(
         data, generations,
         x_key='iota', y_key='epsilon_eff',
-        output=run_dir / 'iota_ripple.png',
+        output=run_dir / 'iota_ripple',
         cmap=cmap_choice,
+        global_best=global_best,
     )
     plot_quantity_vs_quantity(
         data, generations,
         x_key='Aspect ratio', y_key='epsilon_eff',
-        output=run_dir / 'asp_ripple.png',
+        output=run_dir / 'asp_ripple',
         cmap=cmap_choice,
+        global_best=global_best,
     )
 
     # Plot 3
     plot_coils_vs_epsilon(
         data, generations,
-        output=run_dir / 'coils_vs_eps.png',
+        output=run_dir / 'coils_vs_eps',
         cmap=cmap_choice,
+        global_best=global_best,
     )
