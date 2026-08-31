@@ -288,7 +288,7 @@ def main():
                                 / "islands_dr0.12.h5"))
     ap.add_argument("--npart", type=int, default=5000)
     ap.add_argument("--nturn", type=int, default=400)
-    ap.add_argument("--nphi", type=int, default=720)
+    ap.add_argument("--nphi", type=int, default=360)
     ap.add_argument("--outdir", type=str, default=None,
                     help="plot output dir (default: next to the HDF5)")
     args = ap.parse_args()

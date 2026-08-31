@@ -36,25 +36,27 @@ ENGINEERING_BOUNDS = np.array([
     [     0.0,   10000.0],  # coil 1
     [     0.0,   10000.0],  # coil 2
     [-220000.0,  -40000.0], # coil 3
-    [-100000.0,  -10000.0], # coil 4
+    [-140000.0,  -10000.0], # coil 4
 ])
 
-DELT_R_LIST = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
-
+# DELT_R_LIST = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
+DELT_R_LIST = [0.1]
 # Phase 1 sampling budget (per layer) — overnight scenario B (max discovery)
 N_PRE_SURVEY = 65536       # first layer on the engineering box: 4D, 16 pts/dim
                            # (4096 = 8 pts/dim once missed the good-solution
                            # island entirely — the pre-survey is the single
                            # point of failure for island discovery)
-N_DENSE_FIRST = 65536      # first layer, dense Sobol inside the q02/q98 sea
+N_DENSE_FIRST = 65536      # first-layer dense TOTAL budget, distributed over
+                           # the pre-survey islands (N_DENSE_FIRST // n_islands
+                           # per island, floored at N_LOCAL_PER_ISLAND)
 N_LOCAL_PER_ISLAND = 3000  # subsequent layers, per-island local samples
 N_GLOBAL = 1000            # subsequent layers, global verification samples
 ALPHA = 1.5
 
 # Oracle parameters
-RMIN, RMAX, RSTEP = 0.95, 1.45, 0.05   # window widened: axes seen up to R=1.401
-SHORT_NTURN, SHORT_NPHI = 20, 72
-FULL_NTURN, FULL_NPHI = 200, 360
+RMIN, RMAX, RSTEP = 1.1, 1.35, 0.05   # window widened: axes seen up to R=1.401
+SHORT_NTURN, SHORT_NPHI = 20, 360
+FULL_NTURN, FULL_NPHI = 400, 360
 FULL_NPART = 2000          # particle count for the eps "altitude" add-on
 COMPUTE_EPS = True         # compute eps_eff^(3/2) for full-feasible samples
 SMOOTH_N_HARMONICS = 4
@@ -67,17 +69,21 @@ CLUSTER_MIN_SAMPLES = 5
 PROGRESS_INTERVAL = 500
 
 
-def survey_first_bounds(cfg, dr, processes):
-    """Low-resolution pre-survey: return the q02/q98 sea box for dense mapping."""
-    from ripplepy.islands import (
-        full_feasible_suggested_bounds,
-        map_feasible_islands as map_islands,
-    )
+def survey_first_layer(cfg, dr, processes, cluster_eps, cluster_min_samples):
+    """First-layer pre-survey on the engineering box.
+
+    Runs the full oracle over N_PRE_SURVEY Sobol points, CLUSTERS the
+    full-feasible points into islands, saves the result to
+    presurvey_dr{dr}.h5 and returns the mapping result dict.  The dense layer
+    is then calibrated by these clusters (per-island sampling), not by a
+    q02/q98 box -- every layer is island-driven consistently.
+    """
+    from ripplepy.islands import map_feasible_islands as map_islands
 
     print("  first layer pre-survey on engineering box ...")
-    # compute_eps=False: the pre-survey's eps values are discarded (no HDF5 is
-    # written and the bounds only use full_feasible), so skip the particle
-    # integral there and save a few minutes.
+    # compute_eps=False: the pre-survey only locates the islands; the eps
+    # "altitude" is computed in the dense layer (and saved there).
+    h5 = OUTPUT_ROOT / f"presurvey_dr{dr:g}.h5"
     pre = map_islands(
         cfg, ENGINEERING_BOUNDS, dr,
         n_samples=N_PRE_SURVEY,
@@ -89,17 +95,22 @@ def survey_first_bounds(cfg, dr, processes):
         smooth_residual_tol=SMOOTH_RESIDUAL_TOL,
         smooth_max_gap=SMOOTH_MAX_GAP,
         smooth_min_points=SMOOTH_MIN_POINTS,
+        cluster_eps=cluster_eps,
+        cluster_min_samples=cluster_min_samples,
         processes=processes,
         seed=42 + int(dr * 100),
-        do_cluster=False,
+        do_cluster=True,
+        output_h5=h5,
+        progress_interval=PROGRESS_INTERVAL,
     )
-    bounds = full_feasible_suggested_bounds(
-        pre, ENGINEERING_BOUNDS, min_points=8)
-    print(f"  pre-survey: axis_feasible={pre['axis_feasible'].sum()}, "
-          f"full_feasible={pre['full_feasible'].sum()} -> mapping bounds:")
-    for i, (lo, hi) in enumerate(bounds):
-        print(f"    coil {i}: [{lo:.1f}, {hi:.1f}]")
-    return bounds
+    print(f"  pre-survey saved -> {h5.name}: "
+          f"axis_feasible={pre['axis_feasible'].sum()}, "
+          f"full_feasible={pre['full_feasible'].sum()}, "
+          f"islands={len(pre.get('islands', []))}")
+    for isl in pre.get("islands", []):
+        print(f"    island {isl['island_id']}: n={isl['n_points']}, "
+              f"axis_R~{isl['mean_axis_R']:.4f}")
+    return pre
 
 
 def main():
@@ -138,7 +149,6 @@ def main():
         generate_next_samples,
         load_island_mapping_h5,
         map_feasible_islands,
-        sample_bounds,
     )
 
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -155,7 +165,6 @@ def main():
         print(f"  coil {i}: [{lo:.1f}, {hi:.1f}]"
               f"{'  (fixed)' if lo == hi else ''}")
 
-    mapping_bounds = None
     prev = None
     for dr in DELT_R_LIST:
         h5 = OUTPUT_ROOT / f"islands_dr{dr:g}.h5"
@@ -168,13 +177,25 @@ def main():
             continue
 
         if prev is None:
-            # First layer, two-stage: pre-survey sea box, then dense mapping.
-            if mapping_bounds is None:
-                mapping_bounds = survey_first_bounds(cfg, dr, args.processes)
-            bounds = mapping_bounds
-            samples = sample_bounds(bounds, N_DENSE_FIRST,
-                                    seed=42 + int(dr * 100))
-            print(f"  first layer dense mapping: samples = {samples.shape[0]}")
+            # First layer: cluster-calibrated.  The pre-survey (engineering
+            # box, clustered, saved) defines the islands; the dense layer
+            # samples per-island Gaussians + a global set -- no q02/q98 box.
+            pre = survey_first_layer(cfg, dr, args.processes,
+                                     args.cluster_eps,
+                                     args.cluster_min_samples)
+            bounds = np.asarray(pre["bounds"], dtype=np.float64)
+            n_islands = max(1, len(pre.get("islands", [])))
+            n_local_first = max(N_LOCAL_PER_ISLAND,
+                                N_DENSE_FIRST // n_islands)
+            samples = generate_next_samples(
+                pre, bounds,
+                n_local_per_island=n_local_first,
+                n_global=N_GLOBAL,
+                alpha=ALPHA,
+                seed=42 + int(dr * 100))
+            print(f"  first layer dense mapping: samples = {samples.shape[0]} "
+                  f"({n_islands} pre-survey island(s), "
+                  f"{n_local_first}/island + {N_GLOBAL} global)")
         else:
             bounds = np.asarray(prev["bounds"], dtype=np.float64)
             samples = generate_next_samples(
