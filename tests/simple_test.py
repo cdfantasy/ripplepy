@@ -34,10 +34,10 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
-# EXTCUR = [50000.0, 4165.6, 112.2, -109930.7, -98201.8]
-INITIAL_RZ = (1.2454, 0.0)
-DELTA_R = 0.09          # radial offset of the traced surface from the axis
+# EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
+EXTCUR = [50000.0, 3987.0, 0.0, -40000.0, -74561.4]
+INITIAL_RZ = (1.1454, 0.0)
+DELTA_R = 0.11        # radial offset of the traced surface from the axis
 NTURN = 400
 NPHI = 360
 NPART = 5000
@@ -90,7 +90,9 @@ def main():
     print(f"  start_rz = ({start_rz[0]:.4f}, {start_rz[1]:.4f})")
 
     vol,am,iota = calculate_plasma_params(fieldline_data,axis_fieldline,NTURN,NPHI,R0)
-    print(f"Volume  of plasma: {vol:.3e},major radius = {am:.3e},iota = {iota:.3e}")
+    # am = sqrt(V / (2 pi^2 R0)) is the volume-equivalent MINOR radius; R0
+    # (the mean axis radius) is the major radius.
+    print(f"Volume  of plasma: {vol:.3e},minor radius = {am:.3e},iota = {iota:.3e}")
 
     if PLOT:
         print("\n[4] Plotting the field line in 3D ...")

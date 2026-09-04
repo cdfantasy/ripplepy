@@ -171,6 +171,18 @@ def main():
                new_res["full_feasible"].astype(bool))
     eps = cat(old.get("eps", np.full(len(o_s), np.nan)), new_res["eps"])
     axis_used = cat(old["axis_used_RZ"], new_res["axis_used_RZ"])
+
+    def get_arr(name):
+        return old.get(name, np.full(len(o_s), np.nan))
+
+    iota = cat(get_arr("iota"), new_res["iota"])
+    volume = cat(get_arr("volume"), new_res["volume"])
+    minor_radius = cat(get_arr("minor_radius"), new_res["minor_radius"])
+    aspect_ratio = cat(get_arr("aspect_ratio"), new_res["aspect_ratio"])
+    param_values = np.column_stack(
+        [eps, iota, volume, minor_radius, aspect_ratio])
+    param_names = ["eps", "iota", "volume", "minor_radius", "aspect_ratio"]
+
     combined = {
         "delt_r": float(old["delt_r"]),
         "bounds": new_bounds,
@@ -187,13 +199,19 @@ def main():
         "smooth_residual": cat(old["smooth_residual"], new_res["smooth_residual"]),
         "smooth_max_gap": cat(old["smooth_max_gap"], new_res["smooth_max_gap"]),
         "eps": eps,
+        "iota": iota,
+        "volume": volume,
+        "minor_radius": minor_radius,
+        "aspect_ratio": aspect_ratio,
+        "param_names": param_names,
         "params": p,
         "n_samples": int(samples.shape[0]),
         "seed": args.seed,
     }
     islands, free_dims = _cluster_full_feasible(
         samples, full, axis_used, eps=args.cluster_eps,
-        min_samples=args.cluster_min_samples)
+        min_samples=args.cluster_min_samples,
+        param_values=param_values, param_names=param_names)
     combined["islands"] = islands
     combined["free_dims"] = np.asarray(free_dims, dtype=int)
 

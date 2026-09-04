@@ -132,7 +132,7 @@ def evaluate_point(extcur: np.ndarray, delt_r: float, initial_rz: np.ndarray,
     try:
         vol, minor_r, iota = calculate_plasma_params(
             res[2], axis_fld, nturn, nphi, float(R0))
-        plasma = (float(vol), float(minor_r), float(iota))
+        plasma = (float(vol), float(minor_r), float(iota), float(R0))
     except Exception:
         plasma = None
     return axis_rz, float(eps), "ok", plasma, res[2]
@@ -187,6 +187,8 @@ def _plot_summary(labels, best_eps, outpath):
 def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
                    delt_r: float, eps: np.ndarray, full: np.ndarray,
                    free: np.ndarray, axis_used_RZ: np.ndarray,
+                   iota: np.ndarray, volume: np.ndarray,
+                   minor_radius: np.ndarray, aspect_ratio: np.ndarray,
                    args) -> dict | None:
     """Analyse one island: L1/L2, verify, plasma params, Poincare plot."""
     name = f"island {isl['island_id']}"
@@ -255,6 +257,41 @@ def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
     if not np.isfinite(axis_r):
         axis_r = float(isl.get("mean_axis_R", 1.27))
 
+    # ── Multi-0D-parameter report over the island's feasible samples ──────
+    # Requires the per-sample plasma arrays written by the mapping; old H5s
+    # lack them (all-NaN) and this section is skipped.
+    Pfull = np.column_stack(
+        [eps, iota, volume, minor_radius, aspect_ratio])[valid_isl]
+    names5 = ["eps", "iota", "volume", "minor_r", "aspect_r"]
+    okr = np.all(np.isfinite(Pfull), axis=1)
+    if int(okr.sum()) >= MIN_EPS_VALID:
+        Pp = Pfull[okr]
+        Up = u[okr]
+        span_f = bounds[free, 1] - bounds[free, 0]
+
+        # 1) Pearson correlation matrix: 5 params x (5 params + free coils)
+        C = np.corrcoef(np.column_stack([Pp, Up]), rowvar=False)
+        col_names = names5 + [f"coil{c}" for c in free]
+        print("  [corr] Pearson correlations over feasible members "
+              f"(n={int(okr.sum())})")
+        print("        " + " ".join(f"{c:>8}" for c in col_names))
+        for i, rn in enumerate(names5):
+            print(f"    {rn:>8} " + " ".join(
+                f"{C[i, j]:+8.2f}" for j in range(len(col_names))))
+
+        # 2) per-parameter quadratic surrogates p(u)=a+g'u+0.5u'Hu
+        print("  [fits] quadratic surrogate per 0D parameter "
+              "(g in A per normalised unit)")
+        for j, pn in enumerate(names5):
+            aq, gq, Hq, r2q = fit_quadratic(Up, Pp[:, j])
+            eigHq = np.linalg.eigvalsh(Hq)
+            gA = gq * span_f
+            print(f"    {pn:>8}: R2={r2q:.3f} H_eig={np.round(eigHq, 3).tolist()}"
+                  f" | g(A) = {np.round(gA, 0).tolist()}")
+    else:
+        print("  (per-sample plasma arrays missing or too few — skip "
+              "correlation & per-parameter fits; re-run the mapping)")
+
     print(f"  [verify] nturn={args.nturn}, nphi={args.nphi}, "
           f"npart={args.npart}")
     best = None   # (eps, label, axis_rz, plasma, fieldline)
@@ -263,11 +300,11 @@ def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
             x, delt_r, np.array([axis_r, 0.0]), args.nturn, args.nphi,
             args.npart)
         if status == "ok":
-            vol, mr, iota = plasma if plasma else (np.nan,) * 3
+            vol, mr, iota_v, R0_v = plasma if plasma else (np.nan,) * 4
             print(f"    {label:18s}: eps={eps_v:.6f}  axis R={ax[0]:.4f}  "
-                  f"minor_r={mr:.4f}  iota={iota:.3f}  vol={vol:.6f}")
+                  f"minor_r={mr:.4f}  iota={iota_v:.3f}  vol={vol:.6f}")
             if best is None or eps_v < best[0]:
-                best = (eps_v, label, ax, plasma, fld)
+                best = (eps_v, label, ax, plasma, fld, x)
         else:
             print(f"    {label:18s}: {status}")
 
@@ -275,6 +312,14 @@ def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
         out = args.outdir / f"eps_poincare_isl{isl['island_id']}_dr{delt_r:g}.png"
         _plot_poincare(best[4], best[2], args.nphi,
                        f"{name} best ({best[1]}), eps={best[0]:.4f}", out)
+
+    # 3) full 0D-parameter set at the eps optimum (verified best).
+    if best is not None and best[3] is not None:
+        vol_b, mr_b, iota_b, R0_b = best[3]
+        ar_b = float(R0_b / mr_b) if mr_b and mr_b > 0 else np.nan
+        print(f"  [best] {best[1]}: eps={best[0]:.6f} | iota={iota_b:.3f} "
+              f"vol={vol_b:.6f} minor_r={mr_b:.4f} aspect_ratio={ar_b:.2f} "
+              f"| currents={np.round(best[5], 1).tolist()}")
 
     return {"island_id": int(isl["island_id"]), "name": name,
             "best_eps": best[0] if best else np.nan,
@@ -301,8 +346,16 @@ def main():
     bounds = np.asarray(res["bounds"], dtype=np.float64)
     delt_r = float(res["delt_r"])
     full = res["full_feasible"].astype(bool)
-    eps = np.asarray(res.get("eps", np.full(len(samples), np.nan)),
-                     dtype=np.float64)
+    n_all = len(samples)
+    eps = np.asarray(res.get("eps", np.full(n_all, np.nan)), dtype=np.float64)
+    iota = np.asarray(res.get("iota", np.full(n_all, np.nan)), dtype=np.float64)
+    volume = np.asarray(res.get("volume", np.full(n_all, np.nan)),
+                        dtype=np.float64)
+    minor_radius = np.asarray(res.get("minor_radius", np.full(n_all, np.nan)),
+                              dtype=np.float64)
+    aspect_ratio = np.asarray(res.get("aspect_ratio",
+                                      np.full(n_all, np.nan)),
+                              dtype=np.float64)
     axis_used_RZ = np.asarray(res["axis_used_RZ"], dtype=np.float64)
     free = np.flatnonzero(bounds[:, 1] - bounds[:, 0] > 1e-12)
     args.outdir = Path(args.outdir) if args.outdir else Path(args.h5).parent
@@ -323,7 +376,8 @@ def main():
     labels, best_eps = [], []
     for isl in islands:
         info = analyze_island(isl, samples, bounds, delt_r, eps, full, free,
-                              axis_used_RZ, args)
+                              axis_used_RZ, iota, volume, minor_radius,
+                              aspect_ratio, args)
         if info is not None:
             labels.append(info["name"])
             best_eps.append(info["best_eps"])
@@ -331,9 +385,12 @@ def main():
     if labels:
         _plot_summary(labels, best_eps,
                       args.outdir / f"eps_islands_dr{delt_r:g}.png")
-        i_best = int(np.nanargmin(best_eps))
-        print(f"\n[summary] best island: {labels[i_best]} "
-              f"(verified eps={best_eps[i_best]:.6f})")
+        if any(np.isfinite(v) for v in best_eps):
+            i_best = int(np.nanargmin(best_eps))
+            print(f"\n[summary] best island: {labels[i_best]} "
+                  f"(verified eps={best_eps[i_best]:.6f})")
+        else:
+            print("\n[summary] no candidate passed verification")
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ from scipy.stats.qmc import Sobol
 
 from .optimize import OptimizationConfig
 from .ripple import (
+    calculate_plasma_params,
     compute_epstot,
     compute_initial_gradpsi_nemov,
     fieldline_smoothness_poincare,
@@ -83,6 +84,10 @@ def _map_point(point: np.ndarray) -> dict:
         "smooth_residual": np.nan,
         "smooth_max_gap": np.nan,
         "eps": np.nan,
+        "iota": np.nan,
+        "volume": np.nan,
+        "minor_radius": np.nan,
+        "aspect_ratio": np.nan,
         "t_axis": 0.0,
         "t_short": 0.0,
         "t_full": 0.0,
@@ -162,6 +167,28 @@ def _map_point(point: np.ndarray) -> dict:
     out["t_full"] = time.perf_counter() - t2
     out["full_feasible"] = True
 
+    # 0D plasma parameters (iota, volume, minor radius, aspect ratio) for
+    # full-feasible samples, stored alongside eps.  Needs one short axis
+    # re-trace (2 turns at full_nphi) for the per-phi theta reference + R0;
+    # volume/minor radius/iota are then computed on the already-traced full
+    # fieldline.
+    try:
+        axis_fld, axis_ist = trace_fieldline(
+            initial_rz=axis_rz, nturn=2, nphi=p["full_nphi"], verbose=False)
+        if axis_ist == 0:
+            n1 = int(p["full_nphi"])
+            R0 = float(np.mean(
+                np.sqrt(axis_fld[:n1, 0] ** 2 + axis_fld[:n1, 1] ** 2)))
+            vol, minor_r, iota = calculate_plasma_params(
+                fld, axis_fld, p["full_nturn"], p["full_nphi"], R0)
+            out["volume"] = float(vol)
+            out["minor_radius"] = float(minor_r)
+            out["iota"] = float(iota)
+            if minor_r > 0:
+                out["aspect_ratio"] = float(R0 / minor_r)
+    except Exception:
+        pass
+
     # "Altitude" add-on: epsilon_eff^(3/2) for full-feasible samples, so the
     # mapping doubles as a global search with objective values.  Same start
     # point and (nturn, nphi) as the full trace; only the particle integral
@@ -226,8 +253,18 @@ def _dbscan_lite(X: np.ndarray, eps: float, min_samples: int):
 
 def _cluster_full_feasible(samples: np.ndarray, full_mask: np.ndarray,
                            axis_used_RZ: np.ndarray,
-                           eps: float, min_samples: int):
-    """Cluster full-feasible samples in normalised free-coil space."""
+                           eps: float, min_samples: int,
+                           param_values: Optional[np.ndarray] = None,
+                           param_names: Optional[list] = None):
+    """Cluster full-feasible samples in normalised free-coil space.
+
+    When `param_values` (n_samples, n_params) and `param_names` are given,
+    each island additionally stores per-parameter statistics -- means, the
+    parameter-parameter covariance matrix, and the cross-covariance of the
+    normalised free currents with each parameter -- so downstream surrogate
+    fits / correlation analysis can be done per 0D quantity (eps, iota,
+    volume, minor radius, ...) the same way eps is treated.
+    """
     islands = []
     n_free = 0
     bounds = np.column_stack([samples.min(axis=0), samples.max(axis=0)])
@@ -241,6 +278,8 @@ def _cluster_full_feasible(samples: np.ndarray, full_mask: np.ndarray,
     span = hi - lo
     span[span <= 1e-12] = 1.0
     Xn = (X - lo) / span
+    if param_values is not None:
+        Pv = np.asarray(param_values)[full_mask].astype(np.float64)
 
     labels = _dbscan_lite(Xn, eps=eps, min_samples=min_samples)
 
@@ -254,7 +293,7 @@ def _cluster_full_feasible(samples: np.ndarray, full_mask: np.ndarray,
         full_center = samples[full_mask][inds].mean(axis=0)
         q02 = np.percentile(samples[full_mask][inds], 2.0, axis=0)
         q98 = np.percentile(samples[full_mask][inds], 98.0, axis=0)
-        islands.append({
+        island = {
             "island_id": int(cid),
             "n_points": int(len(inds)),
             "sample_indices": np.flatnonzero(full_mask)[inds],
@@ -263,7 +302,27 @@ def _cluster_full_feasible(samples: np.ndarray, full_mask: np.ndarray,
             "cov_free": cov_free,
             "bounds": np.column_stack([q02, q98]),
             "mean_axis_R": float(np.nanmean(axis_used_RZ[full_mask][inds, 0])),
-        })
+        }
+        if param_values is not None:
+            P = Pv[inds]
+            good = np.all(np.isfinite(P), axis=1)
+            Pg = P[good]
+            if len(Pg) >= 2:
+                island["param_mean"] = Pg.mean(axis=0)
+                # parameter-parameter covariance (P x P)
+                island["param_cov"] = np.cov(Pg, rowvar=False)
+                # cross-covariance of normalised free currents x parameters
+                C = np.cov(np.column_stack([pts_n[good], Pg]), rowvar=False)
+                nf = len(free_dims)
+                island["cross_cov_free_param"] = C[:nf, nf:]
+            else:
+                island["param_mean"] = np.full(Pv.shape[1], np.nan)
+                island["param_cov"] = np.full((Pv.shape[1], Pv.shape[1]), np.nan)
+                island["cross_cov_free_param"] = np.full(
+                    (len(free_dims), Pv.shape[1]), np.nan)
+            island["param_names"] = list(param_names or [])
+            island["n_param_samples"] = int(len(Pg))
+        islands.append(island)
     islands.sort(key=lambda d: -d["n_points"])
     for rank, island in enumerate(islands):
         island["island_id"] = rank
@@ -419,6 +478,10 @@ def map_feasible_islands(
     smooth_residual = np.full(n, np.nan, dtype=np.float64)
     smooth_max_gap = np.full(n, np.nan, dtype=np.float64)
     eps = np.full(n, np.nan, dtype=np.float64)
+    iota = np.full(n, np.nan, dtype=np.float64)
+    volume = np.full(n, np.nan, dtype=np.float64)
+    minor_radius = np.full(n, np.nan, dtype=np.float64)
+    aspect_ratio = np.full(n, np.nan, dtype=np.float64)
 
     for k, r in enumerate(results):
         axis_feasible[k] = r["axis_feasible"]
@@ -431,11 +494,22 @@ def map_feasible_islands(
         smooth_residual[k] = r["smooth_residual"]
         smooth_max_gap[k] = r["smooth_max_gap"]
         eps[k] = r.get("eps", np.nan)
+        iota[k] = r.get("iota", np.nan)
+        volume[k] = r.get("volume", np.nan)
+        minor_radius[k] = r.get("minor_radius", np.nan)
+        aspect_ratio[k] = r.get("aspect_ratio", np.nan)
+
+    # Per-sample 0D parameters handed to the clusterer for per-island
+    # statistics (means + covariance matrices), like eps.
+    param_values = np.column_stack(
+        [eps, iota, volume, minor_radius, aspect_ratio])
+    param_names = ["eps", "iota", "volume", "minor_radius", "aspect_ratio"]
 
     if do_cluster:
         islands, free_dims = _cluster_full_feasible(
             samples, full_feasible, axis_used_RZ,
-            eps=cluster_eps, min_samples=cluster_min_samples)
+            eps=cluster_eps, min_samples=cluster_min_samples,
+            param_values=param_values, param_names=param_names)
     else:
         islands, free_dims = [], np.flatnonzero(
             bounds[:, 1] - bounds[:, 0] > 1e-12)
@@ -454,6 +528,11 @@ def map_feasible_islands(
         "smooth_residual": smooth_residual,
         "smooth_max_gap": smooth_max_gap,
         "eps": eps,
+        "iota": iota,
+        "volume": volume,
+        "minor_radius": minor_radius,
+        "aspect_ratio": aspect_ratio,
+        "param_names": param_names,
         "free_dims": np.asarray(free_dims, dtype=int),
         "islands": islands,
         "params": params,
@@ -492,6 +571,10 @@ def save_island_mapping_h5(path: Path, res: dict):
         f.create_dataset("smooth_max_gap", data=res["smooth_max_gap"])
         if "eps" in res:
             f.create_dataset("eps", data=np.asarray(res["eps"], dtype=np.float64))
+        for pname in ("iota", "volume", "minor_radius", "aspect_ratio"):
+            if pname in res:
+                f.create_dataset(pname, data=np.asarray(res[pname],
+                                                        dtype=np.float64))
         if "free_dims" in res:
             f.create_dataset("free_dims", data=np.asarray(res["free_dims"], dtype=int))
 
@@ -502,6 +585,13 @@ def save_island_mapping_h5(path: Path, res: dict):
             for key in ("sample_indices", "center", "center_free",
                         "cov_free", "bounds"):
                 g.create_dataset(key, data=np.asarray(island[key]))
+            if "param_names" in island:
+                g.attrs["param_names"] = json.dumps(island["param_names"])
+                g.attrs["n_param_samples"] = int(island.get("n_param_samples", 0))
+                for key in ("param_mean", "param_cov", "cross_cov_free_param"):
+                    if key in island:
+                        g.create_dataset(key, data=np.asarray(island[key],
+                                                              dtype=np.float64))
 
 
 def load_island_mapping_h5(path: Path) -> dict:
@@ -529,6 +619,12 @@ def load_island_mapping_h5(path: Path) -> dict:
             # Old mapping files predate the "altitude" add-on.
             res["eps"] = np.full(f["samples"].shape[0], np.nan,
                                  dtype=np.float64)
+        for pname in ("iota", "volume", "minor_radius", "aspect_ratio"):
+            if pname in f:
+                res[pname] = f[pname][()]
+            else:
+                res[pname] = np.full(f["samples"].shape[0], np.nan,
+                                     dtype=np.float64)
         if "free_dims" in f:
             res["free_dims"] = f["free_dims"][()]
         else:
@@ -538,7 +634,7 @@ def load_island_mapping_h5(path: Path) -> dict:
         if "islands" in f:
             for name in f["islands"].keys():
                 g = f["islands"][name]
-                islands.append({
+                isl = {
                     "island_id": int(name.split("_")[-1]),
                     "n_points": int(g.attrs["n_points"]),
                     "mean_axis_R": float(g.attrs["mean_axis_R"]),
@@ -547,7 +643,15 @@ def load_island_mapping_h5(path: Path) -> dict:
                     "center_free": g["center_free"][()],
                     "cov_free": g["cov_free"][()],
                     "bounds": g["bounds"][()],
-                })
+                }
+                if "param_names" in g.attrs:
+                    isl["param_names"] = json.loads(g.attrs["param_names"])
+                    isl["n_param_samples"] = int(g.attrs.get("n_param_samples", 0))
+                    for key in ("param_mean", "param_cov",
+                                "cross_cov_free_param"):
+                        if key in g:
+                            isl[key] = g[key][()]
+                islands.append(isl)
         res["islands"] = islands
     return res
 
