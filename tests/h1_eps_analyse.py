@@ -74,6 +74,26 @@ def fit_quadratic(u: np.ndarray, eps: np.ndarray):
     return float(coef[0]), g, H, r2
 
 
+def _neg_eigvecs(H: np.ndarray, span: np.ndarray, g: np.ndarray | None = None):
+    """Return [(eigenvalue, eigenvector in coil-current units A), ...] for
+    every NEGATIVE eigenvalue of H.  Each eigenvector is the coil combination
+    along which the fitted eps landscape curves downward (no interior
+    minimum): moving the coils that way lowers eps (toward the boundary).
+
+    Eigenvectors have an arbitrary sign (v and -v are both valid); when the
+    gradient g is supplied the vector is flipped so that g.v < 0, i.e. it
+    points toward the side that initially descends."""
+    w, V = np.linalg.eigh(H)
+    out = []
+    for i in range(len(w)):
+        if w[i] < 0:
+            v = V[:, i]
+            if g is not None and float(np.dot(g, v)) > 0:
+                v = -v
+            out.append((float(w[i]), v * span))
+    return out
+
+
 def constrained_min(g: np.ndarray, H: np.ndarray, mu: np.ndarray,
                     Sigma_inv: np.ndarray, r2: float):
     """min 1/2 u'Hu + g'u  s.t.  (u-mu)' Sigma^-1 (u-mu) <= r2 (H PD)."""
@@ -202,6 +222,7 @@ def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
 
     u = _normalise(samples, bounds, free)[valid_isl]
     e = eps[valid_isl]
+    span_f = bounds[free, 1] - bounds[free, 0]
 
     # L1: best sampled point in this island.
     k0 = int(np.argmin(e))
@@ -219,6 +240,15 @@ def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
         print(f"  [L2] quadratic fit R^2 = {r2:.3f}; H eig = "
               f"{np.round(eigH, 3).tolist()} "
               f"({'convex' if eigH.min() > 0 else 'NOT convex'})")
+        if eigH.min() <= 0:
+            # Negative eigenvalues: no interior minimum.  Print the
+            # eigenvector of each as the coil-current descent direction (A).
+            for lam_neg, vA in _neg_eigvecs(H, span_f, g):
+                parts = ", ".join(
+                    f"coil{int(free[k])}: {vA[k]:+.0f} A"
+                    for k in range(len(vA)))
+                print(f"       eig={lam_neg:.3f} <0 -> descend along "
+                      f"({parts})")
         if eigH.min() > 0:
             mu = np.asarray(isl.get("center_free"), dtype=np.float64)
             cov = np.asarray(isl.get("cov_free"), dtype=np.float64)
@@ -288,6 +318,11 @@ def analyze_island(isl: dict, samples: np.ndarray, bounds: np.ndarray,
             gA = gq * span_f
             print(f"    {pn:>8}: R2={r2q:.3f} H_eig={np.round(eigHq, 3).tolist()}"
                   f" | g(A) = {np.round(gA, 0).tolist()}")
+            for lam_neg, vA in _neg_eigvecs(Hq, span_f, gq):
+                parts = ", ".join(
+                    f"coil{int(free[k])}: {vA[k]:+.0f}A" for k in range(len(vA)))
+                print(f"        {pn} eig={lam_neg:.3f} <0 -> descend along "
+                      f"({parts})")
     else:
         print("  (per-sample plasma arrays missing or too few — skip "
               "correlation & per-parameter fits; re-run the mapping)")

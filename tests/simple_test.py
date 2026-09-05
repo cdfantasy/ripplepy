@@ -34,10 +34,11 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-# EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
-EXTCUR = [50000.0, 3987.0, 0.0, -40000.0, -74561.4]
-INITIAL_RZ = (1.1454, 0.0)
-DELTA_R = 0.11        # radial offset of the traced surface from the axis
+EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
+INITIAL_RZ = (1.25, 0.0)
+# EXTCUR = [50000.0, 1027.7, 933.0, -64940.2, -15620.6]
+# INITIAL_RZ = (1.0986, 0.0)
+DELTA_R = 0.1        # radial offset of the traced surface from the axis
 NTURN = 400
 NPHI = 360
 NPART = 5000
@@ -56,7 +57,7 @@ def main():
 
     print("\n[2] Searching for the magnetic axis ...")
     axis_rz, R0, axis_fieldline, ok = find_axis(
-        INITIAL_RZ, xtol=1e-5, max_iter=200,delta_r=0.01, verbose=True)
+        INITIAL_RZ, xtol=1e-8, max_iter=200,delta_r=0.01, verbose=True)
     if not ok or axis_rz is None:
         print(f"  ✗ Magnetic axis not found for extcur={EXTCUR}. "
               "Check the coil currents / mgrid file.")
