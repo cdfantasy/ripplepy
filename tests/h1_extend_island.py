@@ -77,6 +77,10 @@ def main():
     new_bounds = NEW_BOUNDS.astype(np.float64)
     p = old.get("params", {})
     gp = lambda k, d: d if p.get(k) is None else p[k]
+    if "ladder_step" not in p:
+        print("  NOTE: base HDF5 predates the radial-ladder oracle; its "
+              "full_feasible did NOT certify the interior column.  Kept old "
+              "samples are reused as-is; extension samples DO get the ladder.")
 
     print(f"base HDF5 : {args.h5} (delt_r={old.get('delt_r')}, "
           f"samples={old['samples'].shape[0]})")
@@ -148,6 +152,8 @@ def main():
         short_nturn=gp("short_nturn", 20), short_nphi=gp("short_nphi", 360),
         full_nturn=gp("full_nturn", 400), full_nphi=gp("full_nphi", 360),
         full_npart=gp("full_npart", 2000), compute_eps=True,
+        ladder_step=gp("ladder_step", 0.02),
+        ladder_nturn=gp("ladder_nturn", 80),
         smooth_n_harmonics=gp("smooth_n_harmonics", 4),
         smooth_residual_tol=gp("smooth_residual_tol", 0.05),
         smooth_max_gap=gp("smooth_max_gap", 1.0),
@@ -194,6 +200,8 @@ def main():
         "short_feasible": cat(old["short_feasible"].astype(bool),
                               new_res["short_feasible"].astype(bool)),
         "short_istate": cat(old["short_istate"], new_res["short_istate"]),
+        "ladder_max_dr": cat(get_arr("ladder_max_dr"),
+                             new_res["ladder_max_dr"]),
         "full_feasible": full,
         "full_istate": cat(old["full_istate"], new_res["full_istate"]),
         "smooth_residual": cat(old["smooth_residual"], new_res["smooth_residual"]),

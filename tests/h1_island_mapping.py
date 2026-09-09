@@ -10,6 +10,7 @@ First layer, two-stage:
   1. low-resolution pre-survey on the engineering hard-box
   2. data-driven q02/q98 "sea" box -> dense Sobol mapping + clustering
 """
+# nohup python -u tests/h1_island_mapping.py --processes 64     > tests/h1_islands/mapping_fresh.log 2>&1 &
 
 from __future__ import annotations
 
@@ -34,9 +35,9 @@ FIXED_COILS = [0]
 ENGINEERING_BOUNDS = np.array([
     [ 50000.0,   50000.0],  # coil 0: TF, fixed
     [     0.0,   10000.0],  # coil 1
-    [     0.0,   10000.0],  # coil 2
-    [-220000.0,  -40000.0], # coil 3
-    [-140000.0,  -10000.0], # coil 4
+    [ -2000.0,   10000.0],  # coil 2
+    [-100000.0,  0], # coil 3
+    [-100000.0,  -0], # coil 4
 ])
 
 # DELT_R_LIST = [0.06, 0.07, 0.08, 0.09, 0.10, 0.11, 0.12]
@@ -58,6 +59,13 @@ RMIN, RMAX, RSTEP = 1.1, 1.35, 0.05   # window widened: axes seen up to R=1.401
 SHORT_NTURN, SHORT_NPHI = 20, 360
 FULL_NTURN, FULL_NPHI = 400, 360
 FULL_NPART = 2000          # particle count for the eps "altitude" add-on
+# Radial-ladder certification (L2): short traces from axis + k*step, k = 1..,
+# up to delt_r must all pass the Poincare FFT smoothness test.  A broken
+# interior (island/chaotic layers below delt_r, iota crossing low-order
+# rationals) rejects the sample even when the delt_r shell alone is good
+# ("lone shell" trap).  eps is only measured on ladder-passing samples.
+LADDER_STEP = 0.02
+LADDER_NTURN = 80
 COMPUTE_EPS = True         # compute eps_eff^(3/2) for full-feasible samples
 SMOOTH_N_HARMONICS = 4
 SMOOTH_RESIDUAL_TOL = 0.05
@@ -91,6 +99,7 @@ def survey_first_layer(cfg, dr, processes, cluster_eps, cluster_min_samples):
         short_nturn=SHORT_NTURN, short_nphi=SHORT_NPHI,
         full_nturn=FULL_NTURN, full_nphi=FULL_NPHI,
         full_npart=FULL_NPART, compute_eps=False,
+        ladder_step=LADDER_STEP, ladder_nturn=LADDER_NTURN,
         smooth_n_harmonics=SMOOTH_N_HARMONICS,
         smooth_residual_tol=SMOOTH_RESIDUAL_TOL,
         smooth_max_gap=SMOOTH_MAX_GAP,
@@ -214,6 +223,7 @@ def main():
             short_nturn=SHORT_NTURN, short_nphi=SHORT_NPHI,
             full_nturn=FULL_NTURN, full_nphi=FULL_NPHI,
             full_npart=FULL_NPART, compute_eps=COMPUTE_EPS,
+            ladder_step=LADDER_STEP, ladder_nturn=LADDER_NTURN,
             smooth_n_harmonics=SMOOTH_N_HARMONICS,
             smooth_residual_tol=SMOOTH_RESIDUAL_TOL,
             smooth_max_gap=SMOOTH_MAX_GAP,
@@ -227,7 +237,8 @@ def main():
         )
 
         print(f"  axis_feasible    : {res['axis_feasible'].sum()}/{len(samples)}")
-        print(f"  short_feasible   : {res['short_feasible'].sum()}")
+        print(f"  ladder_feasible  : {res['short_feasible'].sum()} "
+              "(interior rungs to delt_r clean)")
         print(f"  full_feasible    : {res['full_feasible'].sum()}")
         print(f"  islands          : {len(res['islands'])}")
         for isl in res["islands"]:

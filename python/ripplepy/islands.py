@@ -7,7 +7,11 @@ layer's islands (hot start).
 
 Oracles (in order of increasing cost and fidelity):
   L1  axis scan       : R-scan find_axis, any |Z| <= axis_z_tol
-  L2  short trace     : trace nturn=short_nturn from axis + delt_r
+  L2  radial ladder   : short traces (nturn=ladder_nturn) from axis + k*step,
+                        k = 1, 2, ... up to delt_r; every interior rung must
+                        pass the phi=0 Poincare FFT smoothness test.  A broken
+                        interior (island/chaotic layers below delt_r) rejects
+                        the sample even when the delt_r shell alone is good.
   L3  full trace      : trace nturn=full_nturn from axis + delt_r and check
                         the phi=0 Poincare section with the FFT smoothness test
 """
@@ -79,6 +83,8 @@ def _map_point(point: np.ndarray) -> dict:
         "axis_used_RZ": np.array([np.nan, np.nan]),
         "short_feasible": False,
         "short_istate": -9999,
+        "ladder_max_dr": np.nan,     # deepest clean rung reached (== delt_r
+                                     # when the whole column to delt_r passed)
         "full_feasible": False,
         "full_istate": -9999,
         "smooth_residual": np.nan,
@@ -128,17 +134,66 @@ def _map_point(point: np.ndarray) -> dict:
     start_rz = np.array([axis_rz[0] + p["delt_r"], axis_rz[1]],
                         dtype=np.float64, order="F")
 
-    # L2: short trace.  initial_gradpsi left at zero: the RZ field-line path
-    # is independent of the grad-psi variables, so this is exact for tracing
-    # and avoids an extra B-interpolation call.
+    # L2: radial ladder -- certify a healthy nested column from the axis out
+    # to just below delt_r before the (expensive) full trace at delt_r.
+    # Cheap order: the delt_r shell's short istate gate runs first (20 turns),
+    # then the interior rungs (axis + k*step, k = 1, 2, ... < delt_r), each a
+    # short RZ-only trace whose phi=0 section must pass the FFT smoothness
+    # test.  A broken interior (island/chaotic layers, iota crossing low-order
+    # rationals) fails at the first rung that crosses it, so a config whose
+    # delt_r shell alone is good (the "lone shell" trap, e.g. iota~5/6 or 1/1
+    # interiors) is rejected cheaply.  initial_gradpsi left at zero: the RZ
+    # field-line path is independent of the grad-psi variables, so this is
+    # exact for tracing and avoids an extra B-interpolation call.
+    ladder_step = float(p.get("ladder_step", 0.02))
+    ladder_nturn = int(p.get("ladder_nturn", 80))
     t1 = time.perf_counter()
+
+    # (a) Cheap istate gate at the delt_r shell itself (as before the ladder),
+    # so a shell that dies immediately never reaches the 400-turn full trace.
     _, short_ist = trace_fieldline(
         initial_rz=start_rz, nturn=p["short_nturn"], nphi=p["short_nphi"],
         verbose=False)
-    out["t_short"] = time.perf_counter() - t1
-    out["short_istate"] = short_ist
     if short_ist != 0:
+        out["t_short"] = time.perf_counter() - t1
+        out["short_istate"] = short_ist
         return out
+
+    # (b) Interior rungs: every nested layer from just outside the axis to
+    # delt_r - step must be a real smooth surface.
+    deepest_clean = 0.0
+    dr = ladder_step
+    while ladder_nturn > 0 and dr < float(p["delt_r"]) - 1e-12:
+        rung_rz = np.array([axis_rz[0] + dr, axis_rz[1]],
+                           dtype=np.float64, order="F")
+        fld_rung, ist = trace_fieldline(
+            initial_rz=rung_rz, nturn=ladder_nturn, nphi=p["short_nphi"],
+            verbose=False)
+        if ist != 0:
+            out["t_short"] = time.perf_counter() - t1
+            out["short_istate"] = ist
+            out["ladder_max_dr"] = deepest_clean
+            return out
+        smooth, _ = fieldline_smoothness_poincare(
+            fld_rung, ladder_nturn, p["short_nphi"], axis_rz=axis_rz,
+            n_harmonics=p["smooth_n_harmonics"],
+            residual_rms_frac_tol=p["smooth_residual_tol"],
+            max_angular_gap=p["smooth_max_gap"],
+            min_points=p["smooth_min_points"])
+        if not smooth:
+            # Interior broke at dr = deepest_clean + ladder_step; the delt_r
+            # shell may still be smooth, but the nested column is not real.
+            out["t_short"] = time.perf_counter() - t1
+            out["short_istate"] = -2002
+            out["ladder_max_dr"] = deepest_clean
+            return out
+        deepest_clean = dr
+        dr += ladder_step
+
+    out["t_short"] = time.perf_counter() - t1
+    if ladder_nturn > 0:
+        out["ladder_max_dr"] = deepest_clean
+    out["short_istate"] = 0
     out["short_feasible"] = True
 
     # L3: full-resolution trace + Poincare smoothness check.  The trace and
@@ -166,6 +221,7 @@ def _map_point(point: np.ndarray) -> dict:
         return out
     out["t_full"] = time.perf_counter() - t2
     out["full_feasible"] = True
+    out["ladder_max_dr"] = float(p["delt_r"])   # column + delt_r shell certified
 
     # 0D plasma parameters (iota, volume, minor radius, aspect ratio) for
     # full-feasible samples, stored alongside eps.  Needs one short axis
@@ -373,6 +429,8 @@ def map_feasible_islands(
     full_nphi: int = 360,
     full_npart: int = 2000,
     compute_eps: bool = True,
+    ladder_step: float = 0.02,
+    ladder_nturn: int = 80,
     smooth_n_harmonics: int = 4,
     smooth_residual_tol: float = 0.05,
     smooth_max_gap: float = 1.0,
@@ -392,6 +450,12 @@ def map_feasible_islands(
              rows with lo == hi.
     samples : optional pre-generated sample array.  When omitted, a Sobol set
               of size `n_samples` is drawn inside `bounds`.
+
+    L2 is a radial ladder: short traces (nturn=ladder_nturn) at every
+    axis + k*ladder_step below delt_r must pass the Poincare FFT smoothness
+    test.  Only then is the full trace at delt_r run (L3).  full_feasible
+    therefore means the whole nested column from the axis out to delt_r is
+    certified smooth, not just the delt_r shell.
     """
     bounds = np.asarray(bounds, dtype=np.float64)
     if samples is None:
@@ -406,6 +470,7 @@ def map_feasible_islands(
         short_nphi=int(short_nphi), full_nturn=int(full_nturn),
         full_nphi=int(full_nphi), full_npart=int(full_npart),
         compute_eps=bool(compute_eps),
+        ladder_step=float(ladder_step), ladder_nturn=int(ladder_nturn),
         smooth_n_harmonics=int(smooth_n_harmonics),
         smooth_residual_tol=float(smooth_residual_tol),
         smooth_max_gap=float(smooth_max_gap),
@@ -463,7 +528,7 @@ def map_feasible_islands(
     t_full_done = (np.mean([r["t_full"] for r in results if r["t_full"] > 0])
                    if n_full else 0.0)
     print(f"  stage timing (mean CPU-s/sample): "
-          f"axis={t_axis:.2f}s, short={t_short_all:.2f}s, "
+          f"axis={t_axis:.2f}s, ladder={t_short_all:.2f}s, "
           f"full={t_full_all:.2f}s (all); "
           f"full={t_full_done:.2f}s over {n_full} full-trace samples", flush=True)
 
@@ -473,6 +538,7 @@ def map_feasible_islands(
     axis_used_RZ = np.full((n, 2), np.nan, dtype=np.float64)
     short_feasible = np.zeros(n, dtype=bool)
     short_istate = np.full(n, -9999, dtype=np.int32)
+    ladder_max_dr = np.full(n, np.nan, dtype=np.float64)
     full_feasible = np.zeros(n, dtype=bool)
     full_istate = np.full(n, -9999, dtype=np.int32)
     smooth_residual = np.full(n, np.nan, dtype=np.float64)
@@ -489,6 +555,7 @@ def map_feasible_islands(
         axis_used_RZ[k] = r["axis_used_RZ"]
         short_feasible[k] = r["short_feasible"]
         short_istate[k] = r["short_istate"]
+        ladder_max_dr[k] = r.get("ladder_max_dr", np.nan)
         full_feasible[k] = r["full_feasible"]
         full_istate[k] = r["full_istate"]
         smooth_residual[k] = r["smooth_residual"]
@@ -523,6 +590,7 @@ def map_feasible_islands(
         "axis_used_RZ": axis_used_RZ,
         "short_feasible": short_feasible,
         "short_istate": short_istate,
+        "ladder_max_dr": ladder_max_dr,
         "full_feasible": full_feasible,
         "full_istate": full_istate,
         "smooth_residual": smooth_residual,
@@ -565,6 +633,11 @@ def save_island_mapping_h5(path: Path, res: dict):
         f.create_dataset("axis_used_RZ", data=res["axis_used_RZ"])
         f.create_dataset("short_feasible", data=res["short_feasible"].astype(np.uint8))
         f.create_dataset("short_istate", data=res["short_istate"])
+        f.create_dataset("ladder_max_dr",
+                         data=np.asarray(res.get("ladder_max_dr",
+                                                 np.full(res["samples"].shape[0],
+                                                         np.nan)),
+                                         dtype=np.float64))
         f.create_dataset("full_feasible", data=res["full_feasible"].astype(np.uint8))
         f.create_dataset("full_istate", data=res["full_istate"])
         f.create_dataset("smooth_residual", data=res["smooth_residual"])
@@ -609,6 +682,12 @@ def load_island_mapping_h5(path: Path) -> dict:
         res["axis_used_RZ"] = f["axis_used_RZ"][()]
         res["short_feasible"] = f["short_feasible"][()].astype(bool)
         res["short_istate"] = f["short_istate"][()]
+        if "ladder_max_dr" in f:
+            res["ladder_max_dr"] = f["ladder_max_dr"][()]
+        else:
+            # Pre-ladder files have no radial-column certification; mark NaN.
+            res["ladder_max_dr"] = np.full(f["samples"].shape[0], np.nan,
+                                           dtype=np.float64)
         res["full_feasible"] = f["full_feasible"][()].astype(bool)
         res["full_istate"] = f["full_istate"][()]
         res["smooth_residual"] = f["smooth_residual"][()]
