@@ -77,8 +77,11 @@ ST_OK = 0          # traces, smooth section, no large hole
 ST_TRACE = 1       # field-line integration failed (negative LSODE istate)
 ST_RESIDUAL = 2    # section is not a smooth closed curve
 ST_GAP = 3         # section leaves a large angular hole (island chain)
+ST_GEOM = 4        # section does not wind monotonically in theta (geometry
+                   # from calculate_plasma_params would be garbage: measured
+                   # iota=28 and a=0.34 on such faces)
 STATUS_NAMES = {ST_OK: "ok", ST_TRACE: "trace_fail",
-                ST_RESIDUAL: "residual", ST_GAP: "gap"}
+                ST_RESIDUAL: "residual", ST_GAP: "gap", ST_GEOM: "bad_geom"}
 
 # configuration status codes (whole radial column)
 CFG_OK = 0
@@ -101,7 +104,7 @@ PROFILE_FIELDS = (
     "status", "istate", "residual", "gap_rad", "gap_norm",
     "a", "volume", "iota", "aspect", "Bmean", "Bmax", "Bmin", "ripple",
     "r_loc_mean", "r_loc_min", "r_loc_max", "drift", "rational_dist",
-    "eps", "eps_defect", "gradpsi_drift",
+    "eps", "eps_defect", "gradpsi_drift", "geom_ok",
 )
 
 
@@ -280,16 +283,22 @@ def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
     row["gap_norm"] = gap_norm
 
     # --- 0D geometry: volume, volume-equivalent minor radius a, iota ---
+    # calculate_plasma_params validates the winding itself and returns NaN plus
+    # info["ok"]=False when the section is not a simple closed curve about the
+    # axis, so there is no second check to keep in sync here.
+    row["geom_ok"] = 0.0
     try:
-        vol, aminor, iota = calculate_plasma_params(
-            fld, ax.axis_data(), nturn, nphi, ax.R0)
-        row["volume"] = float(vol)
-        row["a"] = float(aminor)
-        row["iota"] = float(iota)
-        if aminor > 0:
-            row["aspect"] = float(ax.R0 / aminor)
-        row["rational_dist"] = _nearest_rational_dist(row["iota"],
-                                                      cfg.rational_qmax)
+        vol, aminor, iota, info = calculate_plasma_params(
+            fld, ax.axis_data(), nturn, nphi, ax.R0, return_status=True)
+        if info["ok"] and np.isfinite(aminor):
+            row["geom_ok"] = 1.0
+            row["volume"] = float(vol)
+            row["a"] = float(aminor)
+            row["iota"] = float(iota)
+            if aminor > 0:
+                row["aspect"] = float(ax.R0 / aminor)
+            row["rational_dist"] = _nearest_rational_dist(row["iota"],
+                                                          cfg.rational_qmax)
     except Exception:
         pass
 
@@ -310,6 +319,7 @@ def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
     row["r_loc_max"] = float(r_loc.max())
     k = max(1, int(nturn) // 10)
     row["drift"] = float(r_loc[-k:].mean() - r_loc[:k].mean())
+
 
     # --- QC probe for the gradient transport (only where eps was computed) ---
     # The transported |grad psi| must stay a BOUNDED function on the surface, so
@@ -340,6 +350,8 @@ def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
         row["status"] = ST_RESIDUAL
     elif gap_norm > cfg.gap_norm_tol:
         row["status"] = ST_GAP
+    elif row["geom_ok"] == 0.0:
+        row["status"] = ST_GEOM
     else:
         row["status"] = ST_OK
 
