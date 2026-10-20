@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Stage 4: cluster the eps field and fit one quadratic surrogate per island.
+
+Reads stage 3 (``eps_ref.h5``), keeps the trustworthy columns (an eps value and
+a clean grad-psi drift), clusters them in the normalised current box, and fits
+
+    f(eps)  ~  a + b.v + v^T C v          v = B^T (u - centre) / sd
+
+per island, with f = ln or the identity: **both are fitted and the one with the
+smaller cross-validation error wins**.  The CV is always reported as the
+*relative* error in eps, so the two transforms are directly comparable.  (eps
+spans a factor of ~20 over the sampled region, so the log normally wins by a
+wide margin; if it does not, the region is already nearly linear and the linear
+fit is the more honest model.)  The fit is
+done in the PCA basis of the island's own point cloud, restricted to the
+directions that actually have spread -- the islands are thin slabs (31:1 measured
+earlier), so coefficients along a thin direction would otherwise be
+unconstrained noise.
+
+Everything printed is a *diagnostic*: R^2, k-fold cross-validation error, the
+condition number of the design matrix, and the spread of each PCA direction.
+Only islands whose CV error is small enough should be used for prediction.
+
+Outputs
+  surrogate.h5   one group per island: centre, basis, sd, coefficients, metrics
+  (plus the candidate list in the stdout report)
+
+  python -u tests/h1_island_surrogate.py
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import h5py
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial import cKDTree
+
+BASE = Path(__file__).resolve().parent.parent
+
+# ---------------------------------------------------------------------------
+# CONFIG
+# ---------------------------------------------------------------------------
+EPS_H5 = BASE / "tests" / "h1_radial_scan" / "eps_ref.h5"
+OUT_H5 = BASE / "tests" / "h1_radial_scan" / "surrogate.h5"
+
+BOUNDS = np.array([
+    [50000.0, 50000.0],     # coil 0: TF, fixed
+    [0.0, 10000.0],         # coil 1
+    [0.0, 10000.0],         # coil 2
+    [-100000.0, 0.0],       # coil 3
+    [-100000.0, 0.0],       # coil 4
+])
+
+QC_MAX = 1.5            # grad-psi drift above this = corrupted eps, drop it
+MIN_POINTS = 80         # an island needs at least this many points to be fitted
+MAX_DIMS = 4            # PCA directions used (4 = no reduction)
+SD_FRACTION = 0.05      # a direction is usable if sd > SD_FRACTION * sd_max
+N_FOLDS = 5
+TRUST_SIGMA = 2.5       # prediction only inside a Mahalanobis radius
+DBSCAN_MIN_SAMPLES = 8
+DBSCAN_EPS_SWEEP = (0.04, 0.06, 0.08, 0.10, 0.15)
+N_CANDIDATES = 5
+FIT_TRANSFORMS = ("log", "identity")   # both are tried; the better CV wins
+
+
+# ---------------------------------------------------------------------------
+def dbscan_lite(X, eps, min_samples):
+    """Plain DBSCAN on a KD-tree (no sklearn dependency)."""
+    n = len(X)
+    labels = np.full(n, -1, dtype=int)
+    tree = cKDTree(X)
+    neigh = tree.query_ball_point(X, eps)
+    core = np.array([len(nb) >= min_samples for nb in neigh])
+    cid = 0
+    for i in range(n):
+        if labels[i] != -1 or not core[i]:
+            continue
+        stack, labels[i] = [i], cid
+        while stack:
+            j = stack.pop()
+            for k in neigh[j]:
+                if labels[k] == -1:
+                    labels[k] = cid
+                    if core[k]:
+                        stack.append(k)
+        cid += 1
+    return labels
+
+
+def quad_terms(n_dims):
+    """Index list of the quadratic design matrix columns."""
+    terms = [("1", ())]
+    for i in range(n_dims):
+        terms.append((f"v{i}", (i,)))
+    for i in range(n_dims):
+        for j in range(i, n_dims):
+            terms.append((f"v{i}v{j}", (i, j)))
+    return terms
+
+
+def design(v, terms):
+    cols = []
+    for _, idx in terms:
+        if not idx:
+            cols.append(np.ones(len(v)))
+        else:
+            cols.append(np.prod(v[:, idx], axis=1))
+    return np.column_stack(cols)
+
+
+def to_fit(e, transform):
+    """Map eps to the space the quadratic is fitted in."""
+    return np.log(e) if transform == "log" else np.asarray(e, dtype=float)
+
+
+def to_eps(yhat, transform):
+    """Map a fit-space prediction back to eps (relative error is what matters)."""
+    out = np.exp(yhat) if transform == "log" else np.asarray(yhat, dtype=float)
+    return np.maximum(out, 1e-30)
+
+
+def fit_quadratic(v, y, terms):
+    X = design(v, terms)
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    return coef, X
+
+
+def cross_validate(v, e, terms, transform, n_folds, rng):
+    """k-fold CV reported as the RELATIVE error in eps for every transform."""
+    y = to_fit(e, transform)
+    n = len(y)
+    idx = rng.permutation(n)
+    folds = np.array_split(idx, min(n_folds, n))
+    err = np.full(n, np.nan)
+    for f in folds:
+        tr = np.setdiff1d(idx, f)
+        coef, _ = fit_quadratic(v[tr], y[tr], terms)
+        pred = to_eps(design(v[f], terms) @ coef, transform)
+        err[f] = np.abs(pred - e[f]) / np.maximum(e[f], 1e-30)
+    return err
+
+
+# ---------------------------------------------------------------------------
+def fit_island(rows, U, E, rng, tag):
+    """Local PCA -> quadratic fit in the well-spread subspace, for every
+    transform in FIT_TRANSFORMS; the one with the smaller CV wins."""
+    u = U[rows]
+    e = E[rows]
+    c = u.mean(axis=0)
+    d = u - c
+    _, _, vt = np.linalg.svd(d, full_matrices=False)
+    proj = d @ vt.T                      # (n, 4) PCA scores
+    sd = proj.std(axis=0)
+    keep = sd > SD_FRACTION * sd[0]
+    keep = np.flatnonzero(keep)[:MAX_DIMS]
+    if len(keep) == 0:
+        return None
+    v = proj[:, keep] / sd[keep]
+    terms = quad_terms(len(keep))
+
+    results = {}
+    for tr in FIT_TRANSFORMS:
+        y = to_fit(e, tr)
+        coef, X = fit_quadratic(v, y, terms)
+        pred = X @ coef
+        ss_res = np.sum((y - pred) ** 2)
+        ss_tot = np.sum((y - y.mean()) ** 2)
+        cv = cross_validate(v, e, terms, tr, N_FOLDS, rng)
+        results[tr] = {"coef": coef, "y": y, "r2": 1.0 - ss_res / max(ss_tot, 1e-30),
+                       "cv": cv, "cond": float(np.linalg.cond(X))}
+    chosen = min(results, key=lambda t: np.nanmedian(results[t]["cv"]))
+    r = results[chosen]
+    coef = r["coef"]
+
+    # Hessian of the chosen fit, in whitened coordinates
+    n = len(keep)
+    Hm = np.zeros((n, n))
+    for name, idx in terms:
+        if len(idx) == 2:
+            k = terms.index((name, idx))
+            if idx[0] == idx[1]:
+                Hm[idx[0], idx[0]] = 2.0 * coef[k]
+            else:
+                Hm[idx[0], idx[1]] = coef[k]
+                Hm[idx[1], idx[0]] = coef[k]
+    eig = np.linalg.eigvalsh(Hm)
+
+    print(f"  [{tag}] n={len(rows)}  dims kept={len(keep)}/{len(sd)}")
+    for tr in FIT_TRANSFORMS:
+        q = results[tr]
+        mark = "  <-- chosen" if tr == chosen else ""
+        print(f"        {tr:8s}: R2={q['r2']:.3f}  "
+              f"CV med={np.nanmedian(q['cv']) * 100:5.1f}%  "
+              f"p90={np.nanpercentile(q['cv'], 90) * 100:5.1f}%  "
+              f"cond={q['cond']:.1e}{mark}")
+    print("        PCA sd (normalised box): " +
+          "  ".join(f"{x:.4f}" for x in sd) +
+          ("   <- dropped: " + ", ".join(str(i) for i in range(len(sd))
+                                         if i not in keep) if len(keep) < len(sd) else ""))
+    print("        Hessian eigenvalues (" + chosen + "): " +
+          "  ".join(f"{x:+.3f}" for x in eig) +
+          ("   [all negative: interior maximum]" if np.all(eig < 0) else ""))
+    return {
+        "centre": c, "basis": vt[keep], "sd": sd[keep], "coef": coef,
+        "terms": terms, "n": len(rows), "r2": r["r2"],
+        "cv_med": float(np.nanmedian(r["cv"])),
+        "cv_p90": float(np.nanpercentile(r["cv"], 90)), "cond": r["cond"],
+        "eig": eig, "keep": keep, "sd_all": sd, "rows": rows, "v": v,
+        "y": r["y"], "e": e, "transform": chosen,
+    }
+
+
+def propose(fit, U, E, bounds_free, n_cand):
+    """Constrained minimum of the quadratic inside the trust region."""
+    v, y, terms, coef = fit["v"], fit["y"], fit["terms"], fit["coef"]
+    d_m = np.linalg.norm(v, axis=1)
+    r_lim = min(TRUST_SIGMA, np.percentile(d_m, 95))
+
+    def f(x):
+        return float(design(x.reshape(1, -1), terms) @ coef)
+
+    starts = v[np.argsort(y)[:5]]
+    cands = []
+    for s0 in starts:
+        res = minimize(f, s0, method="L-BFGS-B",
+                       bounds=[(-r_lim, r_lim)] * v.shape[1])
+        if res.success:
+            cands.append(res.x)
+    if not cands:
+        return []
+    cands = np.unique(np.round(np.array(cands), 6), axis=0)
+    out = []
+    span = bounds_free[:, 1] - bounds_free[:, 0]
+    for x in cands[:n_cand]:
+        u = fit["centre"] + (x * fit["sd"]) @ fit["basis"]
+        currents = bounds_free[:, 0] + u * span
+        out.append({"v": x, "u": u, "currents": currents,
+                    "eps_pred": float(to_eps(np.array([f(x)]), fit["transform"])[0]),
+                    "mahalanobis": float(np.linalg.norm(x))})
+    out.sort(key=lambda d: d["eps_pred"])
+    return out
+
+
+# ---------------------------------------------------------------------------
+def main():
+    with h5py.File(EPS_H5, "r") as f:
+        S = f["samples"][:]
+        r = {k: f["ref"][k][:] for k in f["ref"]}
+        a0 = float(f.attrs["a0"])
+    e = r["eps"]
+    qc = r["gradpsi_drift"]
+    good = np.isfinite(e) & (e > 0) & np.isfinite(qc) & (qc <= QC_MAX)
+    S, e = S[good], e[good]
+    print(f"stage 3 input: {int(good.sum())} clean columns "
+          f"(eps>0 and drift <= {QC_MAX});  a0 = {a0}")
+
+    span = BOUNDS[:, 1] - BOUNDS[:, 0]
+    free = span > 0
+    bf = BOUNDS[free]
+    U = (S[:, free] - bf[:, 0]) / span[free]
+
+    # --- clustering: how many islands, and is the answer stable in eps? -----
+    nn = cKDTree(U).query(U, k=2)[0][:, 1]
+    print(f"\nnormalised nearest-neighbour distance: med {np.median(nn):.4f} "
+          f"p95 {np.percentile(nn, 95):.4f} max {nn.max():.4f}")
+    best_labels, best_eps, best_score = None, None, -1
+    print("\nDBSCAN eps sweep (min_samples=%d):" % DBSCAN_MIN_SAMPLES)
+    for eps in DBSCAN_EPS_SWEEP:
+        lab = dbscan_lite(U, eps, DBSCAN_MIN_SAMPLES)
+        sizes = sorted([int((lab == k).sum()) for k in np.unique(lab) if k >= 0],
+                       reverse=True)
+        noise = int((lab == -1).sum())
+        print(f"  eps={eps:.2f}: {len(sizes)} clusters, sizes {sizes[:6]}, "
+              f"noise {noise} ({100 * noise / len(lab):.0f}%)")
+        score = (sizes[0] if sizes else 0) - noise * 0.5
+        if score > best_score:
+            best_score, best_labels, best_eps = score, lab, eps
+    labels = best_labels
+    print(f"\nusing eps={best_eps:.2f}")
+
+    # --- per-island fit ----------------------------------------------------
+    rng = np.random.default_rng(0)
+    fits = []
+    print("\nper-island quadratic (whitened PCA coords; both transforms tried):")
+    for k in np.unique(labels):
+        if k < 0:
+            continue
+        rows = np.flatnonzero(labels == k)
+        if len(rows) < MIN_POINTS:
+            print(f"  [island {k}] n={len(rows)} < {MIN_POINTS}, skipped")
+            continue
+        f = fit_island(rows, U, e, rng, f"island {k}")
+        if f is not None:
+            f["label"] = int(k)
+            fits.append(f)
+
+    # --- candidates --------------------------------------------------------
+    print("\nconstrained minima of the quadratic (trust region):")
+    for f in fits:
+        cands = propose(f, U, e, bf, N_CANDIDATES)
+        if not cands:
+            continue
+        print(f"  island {f['label']}  (transform={f['transform']}, "
+              f"CV med {f['cv_med'] * 100:.1f}%, "
+              f"best observed eps={f['e'].min():.4f})")
+        for c in cands:
+            cur = c["currents"]
+            print(f"    pred eps={c['eps_pred']:.4f}  d_M={c['mahalanobis']:.2f}  "
+                  f"extcur=[{', '.join(f'{v:.1f}' for v in cur)}]")
+        f["candidates"] = cands
+
+    # --- save --------------------------------------------------------------
+    out = Path(OUT_H5)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(out, "w") as h:
+        h.attrs["a0"] = a0
+        h.attrs["dbscan_eps"] = best_eps
+        h.attrs["n_clean"] = int(good.sum())
+        for f in fits:
+            g = h.create_group(f"island_{f['label']}")
+            g.create_dataset("centre", data=f["centre"])
+            g.create_dataset("basis", data=f["basis"])
+            g.create_dataset("sd", data=f["sd"])
+            g.create_dataset("coef", data=f["coef"])
+            g.create_dataset("sd_all", data=f["sd_all"])
+            g.create_dataset("rows", data=f["rows"])
+            g.attrs["n"] = f["n"]
+            g.attrs["r2"] = f["r2"]
+            g.attrs["cv_med"] = f["cv_med"]
+            g.attrs["cv_p90"] = f["cv_p90"]
+            g.attrs["cond"] = f["cond"]
+            g.attrs["eig"] = json.dumps([float(x) for x in f["eig"]])
+            g.attrs["terms"] = json.dumps([t[0] for t in f["terms"]])
+            g.attrs["transform"] = f["transform"]
+            g.create_dataset("obs_eps", data=f["e"])
+            g.create_dataset("fit_y", data=f["y"])
+            if f.get("candidates"):
+                g.create_dataset("cand_currents",
+                                 data=np.array([c["currents"]
+                                                for c in f["candidates"]]))
+                g.create_dataset("cand_eps",
+                                 data=np.array([c["eps_pred"]
+                                               for c in f["candidates"]]))
+    print(f"\nsaved -> {out}")
+
+
+if __name__ == "__main__":
+    main()
