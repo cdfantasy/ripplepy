@@ -379,6 +379,7 @@ def _new_cfg_result() -> dict:
         "dr_ref": np.nan,
         "a_ref": np.nan,
         "eps_at_a": np.nan,
+        "eps_status": -1,
         "t_total": 0.0,
     }
 
@@ -489,7 +490,10 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
             rows.append(row)
             out["dr_ref"] = dr_ref
             out["a_ref"] = row["a"]
-            out["eps_at_a"] = float(eps_at_a)
+            # the MEASURED eps at that surface (not the requested a0!), plus the
+            # face status so a failed measurement is not mistaken for a value
+            out["eps_at_a"] = float(row["eps"]) if np.isfinite(row["eps"]) else np.nan
+            out["eps_status"] = int(row["status"])
     out["t_total"] = time.perf_counter() - t0
     return out
 
