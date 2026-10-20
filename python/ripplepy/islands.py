@@ -14,6 +14,12 @@ Oracles (in order of increasing cost and fidelity):
                         the sample even when the delt_r shell alone is good.
   L3  full trace      : trace nturn=full_nturn from axis + delt_r and check
                         the phi=0 Poincare section with the FFT smoothness test
+                        using a STRICT angular-gap gate (l3_max_gap): at
+                        full_nturn turns the section has full_nturn points
+                        (~1 deg spacing), so any large hole means an island
+                        chain / stochastic layer rather than a real surface.
+                        The L2 rungs keep the loose gate because 80 turns only
+                        give ~4.5 deg spacing.
 """
 
 from __future__ import annotations
@@ -211,7 +217,11 @@ def _map_point(point: np.ndarray) -> dict:
         fld, p["full_nturn"], p["full_nphi"], axis_rz=axis_rz,
         n_harmonics=p["smooth_n_harmonics"],
         residual_rms_frac_tol=p["smooth_residual_tol"],
-        max_angular_gap=p["smooth_max_gap"],
+        # STRICT gap gate on the surface eps is measured on: a healthy surface
+        # at full_nturn gives a few-degree worst gap, while an island-chain /
+        # stochastic target surface leaves a tens-of-degrees hole (measured:
+        # 0.075 rad for a healthy column vs 0.86 rad for an iota~5/7 one).
+        max_angular_gap=p.get("l3_max_gap", 0.2),
         min_points=p["smooth_min_points"])
     out["smooth_residual"] = metrics.get("residual_rms_frac", np.nan)
     out["smooth_max_gap"] = metrics.get("max_gap_rad", np.nan)
@@ -431,6 +441,7 @@ def map_feasible_islands(
     compute_eps: bool = True,
     ladder_step: float = 0.02,
     ladder_nturn: int = 80,
+    l3_max_gap: float = 0.2,
     smooth_n_harmonics: int = 4,
     smooth_residual_tol: float = 0.05,
     smooth_max_gap: float = 1.0,
@@ -456,6 +467,11 @@ def map_feasible_islands(
     test.  Only then is the full trace at delt_r run (L3).  full_feasible
     therefore means the whole nested column from the axis out to delt_r is
     certified smooth, not just the delt_r shell.
+
+    The delt_r shell additionally has to pass the STRICT angular-gap gate
+    `l3_max_gap` (rad), because eps is measured on that surface: at full_nturn
+    turns the section is densely sampled, so a wide hole means an island chain
+    or a stochastic layer, not a real magnetic surface.
     """
     bounds = np.asarray(bounds, dtype=np.float64)
     if samples is None:
@@ -471,6 +487,7 @@ def map_feasible_islands(
         full_nphi=int(full_nphi), full_npart=int(full_npart),
         compute_eps=bool(compute_eps),
         ladder_step=float(ladder_step), ladder_nturn=int(ladder_nturn),
+        l3_max_gap=float(l3_max_gap),
         smooth_n_harmonics=int(smooth_n_harmonics),
         smooth_residual_tol=float(smooth_residual_tol),
         smooth_max_gap=float(smooth_max_gap),

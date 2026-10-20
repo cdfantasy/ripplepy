@@ -48,6 +48,8 @@ python/ripplepy/effective_ripple.py
 
 # Test data and run-output directories (server-side data)
 tests/test_file/
+# 旧流程归档，仅本地保留（旧版本可从 git 历史取回）
+tests/_archive/
 tests/h1_islands/
 tests/h1_islands_smoke/
 tests/h1_optimisation/
@@ -55,7 +57,7 @@ tests/h1_island_optimisation/
 tests/fieldline_cache/
 tests/benchmark_results/
 poster/*
-
+paper/*
 
 # IDE / OS
 .vscode/

@@ -20,6 +20,7 @@ from ripplepy import (
     calculate_plasma_params,
     compute_epstot,
     compute_initial_gradpsi_nemov,
+    fieldline_smoothness_poincare,
     find_axis,
     initialize_mgrid_field,
     plot_fieldline_3d,
@@ -36,12 +37,12 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-# EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
-# INITIAL_RZ = (1.25, 0.0)
-EXTCUR = [50000.0, 1027.7, 933.0, -64940.2, -15620.6]
-INITIAL_RZ = (1.0986, 0.0)
+EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
+INITIAL_RZ = (1.25, 0.0)
+# EXTCUR = [50000.0, 1193.2, 0.0, -16790.6, -13296.4]
+# INITIAL_RZ = (1.137, 0.0)
 DELTA_R = 0.1      # radial offset of the traced surface from the axis
-NTURN = 400
+NTURN = 200
 NPHI = 360
 NPART = 5000
 PLOT = True              # set False on a headless machine (needs plotly)
@@ -68,12 +69,22 @@ def _trace_section(start):
     return float(start[0]), int(ist), fld
 
 
+def _section_is_smooth(fld, axis_rz):
+    """Same phi=0 Poincare FFT test the mapping oracle uses (L2/L3)."""
+    smooth, _ = fieldline_smoothness_poincare(
+        fld, POINCARE_NTURN, NPHI, axis_rz=axis_rz, n_harmonics=4,
+        residual_rms_frac_tol=0.05, max_angular_gap=1.0, min_points=16)
+    return bool(smooth)
+
+
 def _plot_radial_poincare(axis_rz, results, outpath, title):
     """Scatter the phi=0 section of every successfully traced radius.
 
-    Each radius is colour-coded (axis -> DELTA_R).  Healthy nested surfaces
-    appear as a family of clean closed curves; broken interiors show up as
-    missing/scattered sections.
+    Each radius is colour-coded by its radial OFFSET from the axis.  Healthy
+    nested surfaces appear as a family of clean closed curves; broken
+    interiors show up as scattered sections.  The same FFT smoothness test
+    the mapping oracle uses is printed per layer, so a "looks messy" layer can
+    be compared against the numeric verdict.
     """
     try:
         import matplotlib
@@ -84,25 +95,41 @@ def _plot_radial_poincare(axis_rz, results, outpath, title):
         return
     plt.figure(figsize=(6, 6))
     n_ok = 0
+    n_smooth = 0
+    print("    dr      res      gap     verdict   (res<=0.05, gap<=1.0)")
     for r0, ist, fld in results:
         if ist != 0 or fld is None:
             continue
         idx = np.arange(0, fld.shape[0], NPHI)      # phi=0 section per turn
+        # Colour by the radial OFFSET from the axis: r0 is the ABSOLUTE R of
+        # the start point (~1.1-1.2), so plotting it raw with vmax=DELTA_R
+        # saturates every layer to yellow and hides which curve is which.
+        r_off = float(r0) - float(axis_rz[0])
         plt.scatter(fld[idx, 0], fld[idx, 1], s=3, alpha=0.7,
-                    c=np.full(len(idx), r0), cmap="viridis",
+                    c=np.full(len(idx), r_off), cmap="viridis",
                     vmin=0.0, vmax=DELTA_R)
         n_ok += 1
+        _, m = fieldline_smoothness_poincare(
+            fld, POINCARE_NTURN, NPHI, axis_rz=axis_rz, n_harmonics=4,
+            residual_rms_frac_tol=0.05, max_angular_gap=1.0, min_points=16)
+        res = m.get("residual_rms_frac", np.nan)
+        gap = m.get("max_gap_rad", np.nan)
+        smooth = bool(_section_is_smooth(fld, axis_rz))
+        n_smooth += int(smooth)
+        print(f"    {r_off:5.3f}  {res:7.3f}  {gap:6.2f}   "
+              f"{'smooth' if smooth else 'BROKEN'}")
     plt.scatter([axis_rz[0]], [axis_rz[1]], c="red", marker="x", s=90,
                 label="axis")
     plt.axis("equal")
     plt.xlabel("R (m)")
     plt.ylabel("Z (m)")
     plt.title(title)
-    plt.colorbar(label="start radius r (m)")
+    plt.colorbar(label="radial offset from axis r (m)")
     plt.tight_layout()
     plt.savefig(outpath, dpi=150)
     plt.close()
-    print(f"  poincare section ({n_ok}/{N_RADIAL} clean surfaces) -> {outpath}")
+    print(f"  poincare section: {n_smooth}/{n_ok} layers are smooth closed "
+          f"curves ({n_ok - n_smooth} broken) -> {outpath}")
 
 
 def main():
