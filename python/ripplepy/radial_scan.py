@@ -101,7 +101,7 @@ PROFILE_FIELDS = (
     "status", "istate", "residual", "gap_rad", "gap_norm",
     "a", "volume", "iota", "aspect", "Bmean", "Bmax", "Bmin", "ripple",
     "r_loc_mean", "r_loc_min", "r_loc_max", "drift", "rational_dist",
-    "eps", "eps_defect", "gradpsi_rel_span",
+    "eps", "eps_defect", "gradpsi_drift",
 )
 
 
@@ -312,11 +312,12 @@ def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
     row["drift"] = float(r_loc[-k:].mean() - r_loc[:k].mean())
 
     # --- QC probe for the gradient transport (only where eps was computed) ---
-    # |grad psi| must stay proportional to a bounded surface quantity along the
-    # line.  R*B_pol is such a bound (it is flat along the line to ~0.3%), so
-    # ratio = |grad psi| / (R*B_pol) has to be flat too.  When the non-physical
-    # mode of the transport takes over, the ratio drifts and its P90/P10 span
-    # explodes.  Measured: 1.25 for a clean face, 3.0+ once corrupted.
+    # The transported |grad psi| must stay a BOUNDED function on the surface, so
+    # its ratio to a bounded geometric quantity (R*B_pol, flat along the line to
+    # 0.3%) may vary geometrically but must not drift secularly.  When the
+    # non-physical mode of the transport takes over, the ratio climbs (or falls)
+    # monotonically along the line.  Anchors measured on H1: 0.87 clean,
+    # 0.73 borderline, 5.44 corrupted.
     gmag = np.asarray(fld[:, 10], dtype=np.float64)
     if np.any(gmag > 0):
         bpol = np.hypot(np.asarray(fld[:, 3], float),
@@ -324,10 +325,13 @@ def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
         ref = np.asarray(fld[:, 0], float) * bpol
         good = np.isfinite(ref) & (ref > 1e-12) & np.isfinite(gmag)
         if good.sum() > 100:
-            ratio = gmag[good] / ref[good]
-            lo, hi = np.percentile(ratio, [10, 90])
-            if lo > 0:
-                row["gradpsi_rel_span"] = float(hi / lo)
+            q = np.full(gmag.size, np.nan)
+            q[good] = gmag[good] / ref[good]
+            qt = q.reshape(int(nturn), int(nphi)).mean(axis=1)
+            kq = max(1, int(nturn) // 10)
+            a_, b_ = qt[:kq].mean(), qt[-kq:].mean()
+            if np.isfinite(a_) and np.isfinite(b_) and abs(a_) > 0:
+                row["gradpsi_drift"] = float(b_ / a_)
 
     # --- gate + eps split ---
     if not (np.isfinite(resid) and np.isfinite(gap_norm)):
@@ -478,6 +482,23 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
     return out
 
 
+def measure_reference(extcur: np.ndarray, cfg: ScanConfig, axis_rz,
+                      dr_ref: float) -> Optional[dict]:
+    """One full-tier measurement (with eps) at a known axis and dr.
+
+    Stage 3 knows the axis and the surface it wants (a = a0, taken from the
+    stage-2 depth map), so the walk does not have to be repeated: this measures
+    exactly one face and returns its row.
+    """
+    extcur = np.asarray(extcur, dtype=np.float64)
+    set_extcur(extcur)
+    ax = _axis_ref(np.asarray(axis_rz, dtype=np.float64), cfg.nphi)
+    if ax is None:
+        return None
+    return measure_surface(extcur, ax, float(dr_ref), cfg.full_nturn, cfg.nphi,
+                           cfg.full_npart, TIER_FULL, cfg, compute_eps=True)
+
+
 def _map_config_indexed(args):
     idx, point = args
     return idx, scan_config(point, _worker_cfg, _worker_eps_at_a)
@@ -520,7 +541,7 @@ def _flat_results(samples: np.ndarray, results: list[dict], cfg: ScanConfig):
             "lcfs_a", "lcfs_volume", "lcfs_iota", "lcfs_aspect",
             "lcfs_residual", "lcfs_gap_norm", "lcfs_ripple",
             "ref_dr", "ref_a", "ref_eps", "ref_eps_defect", "ref_iota",
-            "ref_volume", "ref_ripple", "ref_gradpsi_rel_span",
+            "ref_volume", "ref_ripple", "ref_gradpsi_drift",
             "ref_residual", "ref_gap_norm",
             "ref_nturn", "ref_nphi", "ref_npart", "t_total")
     scal = {k: np.full(n, np.nan) for k in keys}
@@ -561,7 +582,7 @@ def _flat_results(samples: np.ndarray, results: list[dict], cfg: ScanConfig):
                 scal["ref_iota"][i] = row["iota"]
                 scal["ref_volume"][i] = row["volume"]
                 scal["ref_ripple"][i] = row["ripple"]
-                scal["ref_gradpsi_rel_span"][i] = row["gradpsi_rel_span"]
+                scal["ref_gradpsi_drift"][i] = row["gradpsi_drift"]
                 scal["ref_residual"][i] = row["residual"]
                 scal["ref_gap_norm"][i] = row["gap_norm"]
                 scal["ref_eps"][i] = row["eps"]
@@ -679,7 +700,7 @@ def _report(flat: dict, elapsed: float):
             print(f"    {name:16s} min {q[0]:.4f} p5 {q[1]:.4f}"
                   f" med {q[2]:.4f} p95 {q[3]:.4f} max {q[4]:.4f}", flush=True)
     if has_eps.any():
-        for name in ("ref_a", "ref_eps", "ref_gradpsi_rel_span"):
+        for name in ("ref_a", "ref_eps", "ref_gradpsi_drift"):
             v = s[name][has_eps]
             v = v[np.isfinite(v)]
             if v.size == 0:
