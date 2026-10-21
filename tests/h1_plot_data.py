@@ -52,8 +52,12 @@ BASE = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-DATA_DIR = BASE / "tests" / "h1_full_scan"
-SCAN_H5 = DATA_DIR / "scan_all.h5"
+# the scan is written to h1_full_scan on the server and downloaded to
+# h1_radius_scan locally; take whichever exists
+_CANDIDATES = [BASE / "tests" / "h1_full_scan" / "scan_all.h5",
+               BASE / "tests" / "h1_radius_scan" / "scan_all.h5"]
+SCAN_H5 = next((p for p in _CANDIDATES if p.exists()), _CANDIDATES[0])
+DATA_DIR = SCAN_H5.parent
 REFINE_H5 = DATA_DIR / "eps_refine.h5"
 OUTDIR = DATA_DIR / "figs"
 
@@ -105,7 +109,9 @@ def load_data(path=SCAN_H5):
     ref = {k: np.full(n, np.nan) for k in
            ("eps", "a", "dr", "iota", "volume", "drift", "elongation")}
     for i in range(n):
-        m = np.isfinite(prof["a"][i]) & ok[i]
+        # require the column to reach A0 (otherwise the closest face is a
+        # smaller plasma's LCFS and the radii would be mixed)
+        m = ok[i] & np.isfinite(prof["a"][i]) & (prof["a"][i] >= 0.95 * A0)
         if not m.any():
             continue
         j = np.flatnonzero(m)[int(np.argmin(np.abs(prof["a"][i][m] - A0)))]

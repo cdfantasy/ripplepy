@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Stage 4: cluster the eps field and fit one quadratic surrogate per island.
 
-Reads stage 3 (``eps_ref.h5``), keeps the trustworthy columns (an eps value and
-a clean grad-psi drift), clusters them in the normalised current box, and fits
+Reads the one-pass scan (``scan_all.h5``), takes for every configuration the
+surface closest to a = A0 (so all configurations are compared at the same
+radius), keeps the trustworthy ones (eps > 0 and a clean grad-psi drift),
+clusters them in the normalised current box, and fits
 
     f(eps)  ~  a + b.v + v^T C v          v = B^T (u - centre) / sd
 
@@ -43,13 +45,17 @@ BASE = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-EPS_H5 = BASE / "tests" / "h1_radial_scan" / "eps_ref.h5"
-OUT_H5 = BASE / "tests" / "h1_radial_scan" / "surrogate.h5"
+_SCAN_CANDIDATES = [BASE / "tests" / "h1_full_scan" / "scan_all.h5",
+                    BASE / "tests" / "h1_radius_scan" / "scan_all.h5"]
+SCAN_H5 = next((p for p in _SCAN_CANDIDATES if p.exists()), _SCAN_CANDIDATES[0])
+OUT_H5 = SCAN_H5.parent / "surrogate.h5"
+
+A0 = 0.10               # reference minor radius of the config-level eps
 
 BOUNDS = np.array([
     [50000.0, 50000.0],     # coil 0: TF, fixed
-    [0.0, 10000.0],         # coil 1
-    [0.0, 10000.0],         # coil 2
+    [800.0, 5500.0],        # coil 1
+    [0.0, 5000.0],          # coil 2
     [-100000.0, 0.0],       # coil 3
     [-100000.0, 0.0],       # coil 4
 ])
@@ -64,6 +70,31 @@ DBSCAN_MIN_SAMPLES = 8
 DBSCAN_EPS_SWEEP = (0.04, 0.06, 0.08, 0.10, 0.15)
 N_CANDIDATES = 5
 FIT_TRANSFORMS = ("log", "identity")   # both are tried; the better CV wins
+
+
+# ---------------------------------------------------------------------------
+def load_reference(path=SCAN_H5, a0=A0):
+    """Per-configuration eps on the surface closest to a = a0."""
+    with h5py.File(path, "r") as f:
+        S = f["samples"][:]
+        keys = ("a", "eps", "gradpsi_drift", "dr", "iota", "volume",
+                "elongation", "status")
+        prof = {k: f["profile"][k][:] for k in keys}
+    ok = prof["status"] == 0
+    n = len(S)
+    ref = {k: np.full(n, np.nan) for k in
+           ("eps", "a", "dr", "iota", "volume", "elongation",
+            "gradpsi_drift")}
+    for i in range(n):
+        # the column must actually reach a0; otherwise the closest face would be
+        # the LCFS of a smaller plasma and the radii would be mixed
+        m = (ok[i] & np.isfinite(prof["a"][i]) & (prof["a"][i] >= 0.95 * a0))
+        if not m.any():
+            continue
+        j = np.flatnonzero(m)[int(np.argmin(np.abs(prof["a"][i][m] - a0)))]
+        for k in ref:
+            ref[k][i] = prof[k][i, j]
+    return S, ref
 
 
 # ---------------------------------------------------------------------------
@@ -295,16 +326,17 @@ def local_fit(rows, U, E, rng, k=200):
 
 # ---------------------------------------------------------------------------
 def main():
-    with h5py.File(EPS_H5, "r") as f:
-        S = f["samples"][:]
-        r = {k: f["ref"][k][:] for k in f["ref"]}
-        a0 = float(f.attrs["a0"])
-    e = r["eps"]
-    qc = r["gradpsi_drift"]
-    good = np.isfinite(e) & (e > 0) & np.isfinite(qc) & (qc <= QC_MAX)
+    S, ref = load_reference()
+    e = ref["eps"]
+    qc = ref["gradpsi_drift"]
+    have = np.isfinite(e) & (e > 0)
+    good = have & np.isfinite(qc) & (qc <= QC_MAX)
     S, e = S[good], e[good]
-    print(f"stage 3 input: {int(good.sum())} clean columns "
-          f"(eps>0 and drift <= {QC_MAX});  a0 = {a0}")
+    print(f"scan input: {SCAN_H5}\n  {int(have.sum())} configurations reach"
+          f" a ~ {A0} m; {int(good.sum())} clean (eps>0, drift <= {QC_MAX})")
+    if good.sum() < MIN_POINTS:
+        print("  too few clean configurations to fit anything")
+        return
 
     span = BOUNDS[:, 1] - BOUNDS[:, 0]
     free = span > 0
@@ -366,7 +398,7 @@ def main():
     out = Path(OUT_H5)
     out.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(out, "w") as h:
-        h.attrs["a0"] = a0
+        h.attrs["a0"] = A0
         h.attrs["dbscan_eps"] = best_eps
         h.attrs["n_clean"] = int(good.sum())
         for f in fits:
