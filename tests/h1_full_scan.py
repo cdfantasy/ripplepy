@@ -11,10 +11,9 @@ The per-sample axis position is stored with the results, so a later re-walk
 (different eps resolution, radial step or gates) can skip the axis search,
 which dominates the total cost.
 
-The run is chunked: each chunk of CHUNK_SIZE samples is written to its own file
-as soon as it finishes, and existing chunks are skipped when the script is
-relaunched, so an interrupted job resumes where it stopped.  At the end the
-chunks are merged into a single HDF5 file.
+The whole run is a single job: the results are collected in memory and written
+once, at the end, to OUT_H5.  There is no resume -- an interrupted run starts
+from scratch.
 
   nohup python -u tests/h1_full_scan.py > tests/h1_full_scan.log 2>&1 &
 """
@@ -26,8 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ripplepy.radial_scan import (ScanConfig, fmt_duration, merge_chunks,
-                                  merge_dual_chunks, scan_all_box)
+from ripplepy.radial_scan import ScanConfig, fmt_duration, scan_all_box
 
 BASE = Path(__file__).resolve().parent.parent
 
@@ -76,10 +74,9 @@ GAP_NORM_TOL = 15.0
 RECORD_DUAL_AXIS = True
 
 PROCESSES = 64
-CHUNK_SIZE = 1000
+PROGRESS_INTERVAL = 500     # samples between progress lines
 
 OUT_DIR = BASE / "tests" / "h1_full_scan"
-CHUNK_DIR = OUT_DIR / "chunks"
 OUT_H5 = OUT_DIR / "scan_all.h5"
 DUAL_H5 = OUT_DIR / "dual_axis.h5"
 
@@ -110,15 +107,10 @@ def main():
 
     t0 = time.perf_counter()
     scan_all_box(cfg, BOUNDS, n_samples=N_SAMPLES, seed=SEED,
-                 samples=SAMPLES, processes=PROCESSES, out_dir=CHUNK_DIR,
-                 chunk_size=CHUNK_SIZE,
-                 dual_axis_h5=DUAL_H5 if RECORD_DUAL_AXIS else None)
-    print(f"  chunks done in {fmt_duration(time.perf_counter() - t0)}",
-          flush=True)
-
-    merge_chunks(CHUNK_DIR, OUT_H5)
-    if RECORD_DUAL_AXIS:
-        merge_dual_chunks(CHUNK_DIR, DUAL_H5)
+                 samples=SAMPLES, processes=PROCESSES,
+                 output_h5=OUT_H5,
+                 dual_axis_h5=DUAL_H5 if RECORD_DUAL_AXIS else None,
+                 progress_interval=PROGRESS_INTERVAL)
     print(f"  total {fmt_duration(time.perf_counter() - t0)}")
 
 

@@ -740,10 +740,15 @@ def _report(flat: dict, elapsed: float):
     n_ok = int(np.sum(codes == CFG_OK))
     n_max = int(np.sum(codes == CFG_HIT_DRMAX))
     has_eps = np.isfinite(s["ref_eps"])
+    prof_eps = flat["profile"]["eps"]
+    n_surf_eps = int(np.isfinite(prof_eps).sum())
+    n_surf = int((flat["profile"]["status"] == 0).sum())
     print(f"  {n} samples in {fmt_duration(elapsed)}"
           f" ({elapsed / max(n, 1):.2f} s/sample)"
           f": axis {n_axis}, LCFS {n_ok}, hit_drmax {n_max},"
-          f" eps measured {int(has_eps.sum())}", flush=True)
+          f" surfaces {n_surf}, of which with eps {n_surf_eps}"
+          + (f", reference eps {int(has_eps.sum())}" if has_eps.any() else ""),
+          flush=True)
     good = np.isfinite(s["lcfs_dr"]) & (s["lcfs_dr"] > 0)
     if good.any():
         for name in ("lcfs_dr", "lcfs_a", "lcfs_volume", "lcfs_iota",
@@ -855,130 +860,75 @@ def _save_dual_axis(samples: np.ndarray, res: list, cfg: "ScanConfig", path: Pat
 
 def scan_all_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
                  seed: int = 0, samples: Optional[np.ndarray] = None,
-                 processes: int = 0, out_dir: Optional[Path] = None,
-                 chunk_size: int = 1000,
-                 eps_at_a: Optional[float] = None,
+                 processes: int = 0, output_h5: Optional[Path] = None,
                  dual_axis_h5: Optional[Path] = None,
-                 prefix: str = "chunk") -> list:
+                 progress_interval: int = 500) -> dict:
     """One-pass scan: axis + outward walk (+ per-surface eps) for every sample.
 
     Everything happens in a single loop over the samples: the axis is found and
     ranked, then the column is walked outward to its LCFS and, when
     ``cfg.walk_eps`` is on, eps is measured on every surface on the way.  The
-    per-sample axis position is stored in the chunk scalars, so a later re-walk
+    per-sample axis position is stored with the results, so a later re-walk
     (different eps resolution, dr step or gates) can skip the axis search,
     which dominates the cost of the whole scan.
 
-    Chunks are written to ``out_dir/<prefix>_NNNN.h5`` as soon as they finish
-    and existing chunks are skipped on restart, so the job is interruptible.
+    The results are written once, at the end, to ``output_h5``.
     """
     bounds = np.asarray(bounds, dtype=np.float64)
     if samples is None:
         samples = sample_bounds(bounds, n_samples, seed=seed)
     samples = np.asarray(samples, dtype=np.float64)
     n = int(samples.shape[0])
-    out_dir = Path(out_dir) if out_dir is not None else Path.cwd()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    nchunks = (n + chunk_size - 1) // chunk_size
-    print(f"  one-pass scan: {n} samples in {nchunks} chunks of {chunk_size};"
-          f" walk_eps={bool(cfg.walk_eps)}; output {out_dir}", flush=True)
+    print(f"  one-pass scan: {n} samples; walk_eps={bool(cfg.walk_eps)};"
+          f" -> {output_h5}", flush=True)
 
     t0 = time.perf_counter()
-    done_before = 0
+    res: list = [None] * n
     pool = None
     if processes > 0:
         pool = multiprocessing.Pool(processes=processes,
                                     initializer=_worker_init,
-                                    initargs=(cfg, eps_at_a))
+                                    initargs=(cfg, None))
     try:
-        for ci in range(nchunks):
-            lo = ci * chunk_size
-            sub = samples[lo:lo + chunk_size]
-            path = out_dir / f"{prefix}_{ci:04d}.h5"
-            if path.exists():
-                done_before += len(sub)
-                print(f"    chunk {ci + 1}/{nchunks}: exists, skipped", flush=True)
-                continue
-            res: list = [None] * len(sub)
-            if pool is None:
-                _worker_init(cfg, eps_at_a)
-                for k, point in enumerate(sub):
-                    res[k] = scan_config(point, cfg, eps_at_a)
-            else:
-                tasks = [(k, sub[k]) for k in range(len(sub))]
-                for idx, r in pool.imap_unordered(_map_config_indexed, tasks,
-                                                  chunksize=4):
-                    res[idx] = r
-            flat = _flat_results(sub, res, cfg)
-            save_scan_h5(path, flat)
-            if dual_axis_h5 is not None and cfg.axis_record_branches:
-                _save_dual_axis(sub, res, cfg,
-                                out_dir / f"dual_{prefix}_{ci:04d}.h5")
-            done = lo + len(sub)
-            el = time.perf_counter() - t0
-            rate = (done - done_before) / max(el, 1e-9)
-            eta = (n - done) / max(rate, 1e-9)
-            print(f"    chunk {ci + 1}/{nchunks}  {done}/{n}  {rate:.2f}/s"
-                  f"  elapsed {fmt_duration(el)}"
-                  f"  ETA {fmt_duration(eta)}", flush=True)
+        if pool is None:
+            _worker_init(cfg, None)
+            for k, point in enumerate(samples):
+                res[k] = scan_config(point, cfg)
+                if progress_interval and (k + 1) % progress_interval == 0:
+                    el = time.perf_counter() - t0
+                    rate = (k + 1) / max(el, 1e-9)
+                    print(f"    {k + 1}/{n}  {rate:.2f}/s"
+                          f"  elapsed {fmt_duration(el)}"
+                          f"  ETA {fmt_duration((n - k - 1) / max(rate, 1e-9))}",
+                          flush=True)
+        else:
+            tasks = [(k, samples[k]) for k in range(n)]
+            for done, (idx, r) in enumerate(
+                    pool.imap_unordered(_map_config_indexed, tasks,
+                                        chunksize=4), start=1):
+                res[idx] = r
+                if progress_interval and done % progress_interval == 0:
+                    el = time.perf_counter() - t0
+                    rate = done / max(el, 1e-9)
+                    print(f"    {done}/{n}  {rate:.2f}/s"
+                          f"  elapsed {fmt_duration(el)}"
+                          f"  ETA {fmt_duration((n - done) / max(rate, 1e-9))}",
+                          flush=True)
     finally:
         if pool is not None:
             pool.close()
             pool.join()
-    print(f"  all chunks in {fmt_duration(time.perf_counter() - t0)}",
+
+    flat = _flat_results(samples, res, cfg)
+    if dual_axis_h5 is not None and cfg.axis_record_branches:
+        _save_dual_axis(samples, res, cfg, Path(dual_axis_h5))
+    if output_h5 is not None:
+        save_scan_h5(Path(output_h5), flat)
+        print(f"  saved -> {output_h5}", flush=True)
+    print(f"  scan finished in {fmt_duration(time.perf_counter() - t0)}",
           flush=True)
-    return samples
-
-
-def merge_chunks(out_dir, out_h5, prefix: str = "chunk"):
-    """Concatenate the chunk files of a one-pass scan into a single file."""
-    files = sorted(Path(out_dir).glob(f"{prefix}_*.h5"))
-    if not files:
-        raise FileNotFoundError(f"no {prefix}_*.h5 chunks under {out_dir}")
-    print(f"  merging {len(files)} chunks", flush=True)
-    parts = [load_scan_h5(f) for f in files]
-    flat = {
-        "samples": np.concatenate([p["samples"] for p in parts]),
-        "profile": {k: np.concatenate([p["profile"][k] for p in parts])
-                    for k in parts[0]["profile"]},
-        "scalars": {k: np.concatenate([p["scalars"][k] for p in parts])
-                    for k in parts[0]["scalars"]},
-        "config": parts[0].get("config", {}),
-    }
-    save_scan_h5(Path(out_h5), flat)
-    print(f"  merged -> {out_h5}", flush=True)
+    _report(flat, time.perf_counter() - t0)
     return flat
-
-
-def merge_dual_chunks(out_dir, out_h5, prefix: str = "chunk"):
-    """Concatenate the dual-axis side files of a one-pass scan (if any)."""
-    files = sorted(Path(out_dir).glob(f"dual_{prefix}_*.h5"))
-    if not files:
-        print("  no dual-axis side files", flush=True)
-        return None
-    parts = []
-    for f in files:
-        with h5py.File(f, "r") as h:
-            parts.append({k: h[k][:] for k in
-                          ("samples", "branch_reach", "branch_R", "branch_Z",
-                           "n_branches")})
-    n = sum(len(p["samples"]) for p in parts)
-    maxb = max(p["branch_reach"].shape[1] for p in parts)
-    out = {k: np.full((n, maxb), np.nan) for k in
-           ("branch_reach", "branch_R", "branch_Z")}
-    out["samples"] = np.concatenate([p["samples"] for p in parts])
-    out["n_branches"] = np.concatenate([p["n_branches"] for p in parts])
-    k = 0
-    for p in parts:
-        m = len(p["samples"])
-        for key in ("branch_reach", "branch_R", "branch_Z"):
-            out[key][k:k + m, :p[key].shape[1]] = p[key]
-        k += m
-    with h5py.File(out_h5, "w") as h:
-        for key, val in out.items():
-            h.create_dataset(key, data=val)
-    print(f"  dual-axis: {n} configurations -> {out_h5}", flush=True)
-    return out
 
 
 def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
