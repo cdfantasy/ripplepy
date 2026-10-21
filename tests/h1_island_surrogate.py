@@ -213,35 +213,84 @@ def fit_island(rows, U, E, rng, tag):
     }
 
 
-def propose(fit, U, E, bounds_free, n_cand):
-    """Constrained minimum of the quadratic inside the trust region."""
+def propose(fit, bf, span, n_cand, tag):
+    """Constrained minimum of the quadratic inside the data-supported region.
+
+    Three guards, all of which were violated by the first version:
+      * the search box is the observed extent of each whitened axis, not a fixed
+        +/-TRUST_SIGMA -- the earlier one produced a candidate 5 sigma out,
+        where a saddle-shaped model keeps decreasing for no physical reason;
+      * the candidate is clipped to the coil box, and its prediction is
+        re-evaluated at the clipped point (the whitened -> current map is not
+        box preserving);
+      * candidates that leave the data cloud or predict well below the best
+        observed value are flagged as extrapolations instead of being reported
+        as improvements.
+    """
     v, y, terms, coef = fit["v"], fit["y"], fit["terms"], fit["coef"]
     d_m = np.linalg.norm(v, axis=1)
-    r_lim = min(TRUST_SIGMA, np.percentile(d_m, 95))
+    r_lim = float(np.percentile(d_m, 98))
+    lo, hi = v.min(axis=0), v.max(axis=0)
+    e_obs = fit["e"]
 
     def f(x):
-        return float(design(x.reshape(1, -1), terms) @ coef)
+        arr = np.asarray(design(x.reshape(1, -1), terms) @ coef).ravel()
+        return float(arr[0])
 
     starts = v[np.argsort(y)[:5]]
     cands = []
     for s0 in starts:
-        res = minimize(f, s0, method="L-BFGS-B",
-                       bounds=[(-r_lim, r_lim)] * v.shape[1])
+        res = minimize(f, s0, method="L-BFGS-B", bounds=list(zip(lo, hi)))
         if res.success:
             cands.append(res.x)
     if not cands:
         return []
-    cands = np.unique(np.round(np.array(cands), 6), axis=0)
+    # dedupe by proximity (several starts converge to the same point)
+    uniq = []
+    for x in cands:
+        if all(np.linalg.norm(x - u) > 1e-3 for u in uniq):
+            uniq.append(x)
+    cands = np.array(uniq)
+
     out = []
-    span = bounds_free[:, 1] - bounds_free[:, 0]
-    for x in cands[:n_cand]:
+    for x in cands:
         u = fit["centre"] + (x * fit["sd"]) @ fit["basis"]
-        currents = bounds_free[:, 0] + u * span
-        out.append({"v": x, "u": u, "currents": currents,
-                    "eps_pred": float(to_eps(np.array([f(x)]), fit["transform"])[0]),
-                    "mahalanobis": float(np.linalg.norm(x))})
+        u_clip = np.clip(u, 0.0, 1.0)
+        clipped = bool(np.max(np.abs(u - u_clip)) > 1e-9)
+        vv = ((u_clip - fit["centre"]) @ fit["basis"].T) / fit["sd"]
+        eps_pred = float(to_eps(np.array([f(vv)]), fit["transform"])[0])
+        dist = np.linalg.norm(v - vv, axis=1)
+        j = int(np.argmin(dist))
+        out.append({"u": u_clip, "v": vv,
+                    "currents": bf[:, 0] + u_clip * span,
+                    "eps_pred": eps_pred, "mahalanobis": float(np.linalg.norm(vv)),
+                    "clipped": clipped, "nn_dist": float(dist[j]),
+                    "nn_eps": float(e_obs[j])})
     out.sort(key=lambda d: d["eps_pred"])
-    return out
+
+    print(f"  [{tag}] data Mahalanobis radius: med {np.median(d_m):.2f} "
+          f"98% {r_lim:.2f}   best observed eps {e_obs.min():.4f}")
+    for c in out[:n_cand]:
+        flags = []
+        if c["mahalanobis"] > r_lim:
+            flags.append("OUTSIDE DATA")
+        if c["eps_pred"] < 0.8 * float(e_obs.min()):
+            flags.append("EXTRAPOLATED")
+        if c["clipped"]:
+            flags.append("clipped to box")
+        print(f"    pred eps={c['eps_pred']:.4f}  d_M={c['mahalanobis']:.2f}  "
+              f"nearest obs eps={c['nn_eps']:.4f} at d={c['nn_dist']:.2f}"
+              + ("   <-- " + ", ".join(flags) if flags else ""))
+        print(f"      extcur=[{', '.join(f'{x:.1f}' for x in c['currents'])}]")
+    return out[:n_cand]
+
+
+def local_fit(rows, U, E, rng, k=200):
+    """Refit the quadratic on the k nearest neighbours of the best point."""
+    i_best = rows[int(np.argmin(E[rows]))]
+    d = np.linalg.norm(U[rows] - U[i_best], axis=1)
+    near = rows[np.argsort(d)[:min(k, len(rows))]]
+    return fit_island(near, U, E, rng, f"local k={len(near)} around best")
 
 
 # ---------------------------------------------------------------------------
@@ -298,18 +347,19 @@ def main():
             fits.append(f)
 
     # --- candidates --------------------------------------------------------
-    print("\nconstrained minima of the quadratic (trust region):")
+    print("\nconstrained minima of the quadratic (data-supported region):")
+    span_free = span[free]
     for f in fits:
-        cands = propose(f, U, e, bf, N_CANDIDATES)
-        if not cands:
-            continue
-        print(f"  island {f['label']}  (transform={f['transform']}, "
-              f"CV med {f['cv_med'] * 100:.1f}%, "
-              f"best observed eps={f['e'].min():.4f})")
-        for c in cands:
-            cur = c["currents"]
-            print(f"    pred eps={c['eps_pred']:.4f}  d_M={c['mahalanobis']:.2f}  "
-                  f"extcur=[{', '.join(f'{v:.1f}' for v in cur)}]")
+        cands = propose(f, bf, span_free, N_CANDIDATES,
+                        f"island {f['label']} global (transform={f['transform']}, "
+                        f"CV {f['cv_med'] * 100:.1f}%)")
+        lf = local_fit(f["rows"], U, e, rng)
+        if lf is not None:
+            lc = propose(lf, bf, span_free, N_CANDIDATES,
+                         f"island {f['label']} local (transform={lf['transform']}, "
+                         f"CV {lf['cv_med'] * 100:.1f}%)")
+            cands = (cands or []) + (lc or [])
+            f["local"] = lf
         f["candidates"] = cands
 
     # --- save --------------------------------------------------------------
