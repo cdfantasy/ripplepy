@@ -102,7 +102,8 @@ TIER_FULL = 1
 PROFILE_FIELDS = (
     "dr", "R_start", "Z_start", "tier", "nturn", "nphi", "npart",
     "status", "istate", "residual", "gap_rad", "gap_norm",
-    "a", "volume", "iota", "aspect", "Bmean", "Bmax", "Bmin", "ripple",
+    "a", "volume", "iota", "aspect", "elongation",
+    "Bmean", "Bmax", "Bmin", "ripple",
     "r_loc_mean", "r_loc_min", "r_loc_max", "drift", "rational_dist",
     "eps", "eps_defect", "gradpsi_drift", "geom_ok",
 )
@@ -132,6 +133,7 @@ class ScanConfig:
     full_nturn: int = 400
     full_npart: int = 2000
     # radial walk
+    walk_eps: bool = False     # True = measure eps on EVERY walked surface
     dr0: float = 0.02
     dr_step: float = 0.02
     dr_max: float = 0.60
@@ -141,6 +143,10 @@ class ScanConfig:
     smooth_n_harmonics: int = 4
     # low-order rational bookkeeping (diagnostic only, no filtering yet)
     rational_qmax: int = 8
+    # diagnostic: when a sample has several candidate axes, probe ALL of them
+    # (instead of stopping at the first one that reaches the probe radius) and
+    # keep their individual reaches.  Off by default: it only costs time.
+    axis_record_branches: bool = False
 
     @property
     def max_faces(self) -> int:
@@ -209,22 +215,31 @@ def _probe_reach(extcur, ax: _AxisRef, cfg: "ScanConfig") -> float:
     return reach
 
 
-def _pick_axis(extcur, axes, cfg: "ScanConfig"):
-    """Rank axis branches by how far their nested column survives."""
+def _pick_axis(extcur, axes, cfg: "ScanConfig", all_branches: bool = False):
+    """Rank axis branches by how far their nested column survives.
+
+    With ``all_branches`` every candidate is probed (no early exit) and the
+    per-branch reaches are returned as well, so a configuration with two
+    usable axes can be identified.  Default behaviour is unchanged.
+    """
     best = None
+    ranked = []
     for cand in axes[: int(cfg.n_axis_tries)]:
         axis_rz = np.asarray(cand, dtype=np.float64)
         ax = _axis_ref(axis_rz, cfg.nphi)
         if ax is None:
             continue
         reach = _probe_reach(extcur, ax, cfg)
+        ranked.append({"reach": float(reach),
+                       "axis_R": float(axis_rz[0]),
+                       "axis_Z": float(axis_rz[1])})
         if best is None or reach > best[1]:
             best = (ax, reach, axis_rz)
-        if reach >= min(cfg.axis_probe_dr, cfg.dr_max) - 1e-12:
+        if not all_branches and reach >= min(cfg.axis_probe_dr, cfg.dr_max) - 1e-12:
             break          # this branch already reaches the probe radius
     if best is None:
-        return None, np.nan, np.array([np.nan, np.nan])
-    return best
+        return None, np.nan, np.array([np.nan, np.nan]), ranked
+    return best[0], best[1], best[2], ranked
 
 
 def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
@@ -297,6 +312,7 @@ def measure_surface(extcur: np.ndarray, ax: _AxisRef, dr: float,
             row["iota"] = float(iota)
             if aminor > 0:
                 row["aspect"] = float(ax.R0 / aminor)
+            row["elongation"] = float(info["elongation"])
             row["rational_dist"] = _nearest_rational_dist(row["iota"],
                                                           cfg.rational_qmax)
     except Exception:
@@ -431,12 +447,16 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
     # early-exit `find_axis_any` returned the first R-scan hit, and for a
     # measured sample that was the wrong branch (R=1.267 instead of the healthy
     # R=1.125), which silently rejected a good current configuration.
-    ax, reach, axis_rz = _pick_axis(extcur, axes, cfg)
+    want_all = bool(getattr(cfg, "axis_record_branches", False)) and len(axes) > 1
+    ax, reach, axis_rz, ranked = _pick_axis(extcur, axes, cfg,
+                                            all_branches=want_all)
     if ax is None:
         out["t_total"] = time.perf_counter() - t0
         return out
     out["axis_RZ"] = axis_rz
     out["axis_reach"] = reach
+    if want_all:
+        out["branches"] = ranked
 
     rows = out["rows"]
     dr = float(cfg.dr0)
@@ -445,7 +465,7 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
     while dr <= float(cfg.dr_max) + 1e-12:
         row = measure_surface(extcur, ax, dr, cfg.profile_nturn, cfg.nphi,
                               cfg.profile_npart, TIER_PROFILE, cfg,
-                              compute_eps=False)
+                              compute_eps=bool(cfg.walk_eps))
         rows.append(row)
         if row["status"] != ST_OK:
             bracket = (last_ok, dr)
@@ -469,7 +489,7 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
         mid = 0.5 * (lo + hi)
         row = measure_surface(extcur, ax, mid, cfg.profile_nturn, cfg.nphi,
                               cfg.profile_npart, TIER_PROFILE, cfg,
-                              compute_eps=False)
+                              compute_eps=bool(cfg.walk_eps))
         rows.append(row)
         if row["status"] == ST_OK:
             lo = mid
@@ -555,6 +575,7 @@ def _flat_results(samples: np.ndarray, results: list[dict], cfg: ScanConfig):
     keys = ("axis_R", "axis_Z", "axis_count", "axis_reach", "status",
             "n_faces", "lcfs_dr",
             "lcfs_a", "lcfs_volume", "lcfs_iota", "lcfs_aspect",
+            "lcfs_elongation",
             "lcfs_residual", "lcfs_gap_norm", "lcfs_ripple",
             "ref_dr", "ref_a", "ref_eps", "ref_eps_defect", "ref_iota",
             "ref_volume", "ref_ripple", "ref_gradpsi_drift",
@@ -586,6 +607,7 @@ def _flat_results(samples: np.ndarray, results: list[dict], cfg: ScanConfig):
                 scal["lcfs_volume"][i] = row["volume"]
                 scal["lcfs_iota"][i] = row["iota"]
                 scal["lcfs_aspect"][i] = row["aspect"]
+                scal["lcfs_elongation"][i] = row["elongation"]
                 scal["lcfs_residual"][i] = row["residual"]
                 scal["lcfs_gap_norm"][i] = row["gap_norm"]
                 scal["lcfs_ripple"][i] = row["ripple"]
@@ -746,7 +768,7 @@ def stage1_probe(extcur: np.ndarray, cfg: ScanConfig) -> dict:
     t0 = time.perf_counter()
     extcur = np.asarray(extcur, dtype=np.float64)
     out = {"n_axes": 0, "axis_R": np.nan, "axis_Z": np.nan, "reach": np.nan,
-           "t_total": 0.0}
+           "branches": [], "t_total": 0.0}
     set_extcur(extcur)
     axes = find_axis_multi_guess(
         rmin=cfg.rmin, rmax=cfg.rmax, rstep=cfg.rstep, z0=0.0,
@@ -754,11 +776,16 @@ def stage1_probe(extcur: np.ndarray, cfg: ScanConfig) -> dict:
         axis_z_tol=cfg.axis_z_tol, nphi=cfg.axis_nphi)
     out["n_axes"] = len(axes)
     if axes:
-        ax, reach, axis_rz = _pick_axis(extcur, axes, cfg)
+        # when asked, probe every branch so that two usable axes are not hidden
+        want_all = bool(getattr(cfg, "axis_record_branches", False)) and len(axes) > 1
+        ax, reach, axis_rz, ranked = _pick_axis(extcur, axes, cfg,
+                                                all_branches=want_all)
         if ax is not None:
             out["axis_R"] = float(axis_rz[0])
             out["axis_Z"] = float(axis_rz[1])
             out["reach"] = float(reach)
+        if want_all:
+            out["branches"] = ranked
     out["t_total"] = time.perf_counter() - t0
     return out
 
@@ -768,10 +795,180 @@ def _probe_indexed(args):
     return idx, stage1_probe(point, _worker_cfg)
 
 
+def _save_dual_axis(samples: np.ndarray, res: list, cfg: "ScanConfig", path: Path):
+    """Collect the configurations where TWO axis branches pass the first probe.
+
+    A configuration counts as dual-axis when at least two distinct candidate
+    branches both survive the first probe step (dr0), i.e. both have a usable
+    nested column.  This is a side product of stage 1: it is written to its own
+    file so the main axis map keeps its schema.
+    """
+    first = float(cfg.dr0) - 1e-9
+    rows = []
+    for i, r in enumerate(res):
+        br = r.get("branches") or []
+        good = [b for b in br if b["reach"] >= first]
+        if len(good) >= 2:
+            rows.append((i, good))
+    if not rows:
+        print(f"  dual-axis: none found (wrote nothing to {path})", flush=True)
+        return
+    maxb = max(len(g) for _, g in rows)
+    m = len(rows)
+    samples = np.asarray(samples)[[i for i, _ in rows]]
+    reach = np.full((m, maxb), np.nan)
+    bR = np.full((m, maxb), np.nan)
+    bZ = np.full((m, maxb), np.nan)
+    for k, (_, g) in enumerate(rows):
+        for j, b in enumerate(sorted(g, key=lambda q: -q["reach"])):
+            reach[k, j] = b["reach"]
+            bR[k, j] = b["axis_R"]
+            bZ[k, j] = b["axis_Z"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as f:
+        f.create_dataset("samples", data=samples)
+        f.create_dataset("branch_reach", data=reach)
+        f.create_dataset("branch_R", data=bR)
+        f.create_dataset("branch_Z", data=bZ)
+        f.create_dataset("n_branches", data=np.sum(np.isfinite(reach), axis=1))
+        f.attrs["probe_dr"] = float(cfg.axis_probe_dr)
+        f.attrs["first_step"] = float(cfg.dr0)
+        f.attrs["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"  dual-axis: {m} configurations with >=2 usable axes -> {path}",
+          flush=True)
+
+
+def scan_all_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
+                 seed: int = 0, samples: Optional[np.ndarray] = None,
+                 processes: int = 0, out_dir: Optional[Path] = None,
+                 chunk_size: int = 1000,
+                 eps_at_a: Optional[float] = None,
+                 dual_axis_h5: Optional[Path] = None,
+                 prefix: str = "chunk") -> list:
+    """One-pass scan: axis + outward walk (+ per-surface eps) for every sample.
+
+    Everything happens in a single loop over the samples: the axis is found and
+    ranked, then the column is walked outward to its LCFS and, when
+    ``cfg.walk_eps`` is on, eps is measured on every surface on the way.  The
+    per-sample axis position is stored in the chunk scalars, so a later re-walk
+    (different eps resolution, dr step or gates) can skip the axis search,
+    which dominates the cost of the whole scan.
+
+    Chunks are written to ``out_dir/<prefix>_NNNN.h5`` as soon as they finish
+    and existing chunks are skipped on restart, so the job is interruptible.
+    """
+    bounds = np.asarray(bounds, dtype=np.float64)
+    if samples is None:
+        samples = sample_bounds(bounds, n_samples, seed=seed)
+    samples = np.asarray(samples, dtype=np.float64)
+    n = int(samples.shape[0])
+    out_dir = Path(out_dir) if out_dir is not None else Path.cwd()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    nchunks = (n + chunk_size - 1) // chunk_size
+    print(f"  one-pass scan: {n} samples in {nchunks} chunks of {chunk_size};"
+          f" walk_eps={bool(cfg.walk_eps)}; output {out_dir}", flush=True)
+
+    t0 = time.perf_counter()
+    done_before = 0
+    pool = None
+    if processes > 0:
+        pool = multiprocessing.Pool(processes=processes,
+                                    initializer=_worker_init,
+                                    initargs=(cfg, eps_at_a))
+    try:
+        for ci in range(nchunks):
+            lo = ci * chunk_size
+            sub = samples[lo:lo + chunk_size]
+            path = out_dir / f"{prefix}_{ci:04d}.h5"
+            if path.exists():
+                done_before += len(sub)
+                print(f"    chunk {ci + 1}/{nchunks}: exists, skipped", flush=True)
+                continue
+            res: list = [None] * len(sub)
+            if pool is None:
+                _worker_init(cfg, eps_at_a)
+                for k, point in enumerate(sub):
+                    res[k] = scan_config(point, cfg, eps_at_a)
+            else:
+                tasks = [(k, sub[k]) for k in range(len(sub))]
+                for idx, r in pool.imap_unordered(_map_config_indexed, tasks,
+                                                  chunksize=4):
+                    res[idx] = r
+            flat = _flat_results(sub, res, cfg)
+            save_scan_h5(path, flat)
+            if dual_axis_h5 is not None and cfg.axis_record_branches:
+                _save_dual_axis(sub, res, cfg,
+                                out_dir / f"dual_{prefix}_{ci:04d}.h5")
+            done = lo + len(sub)
+            el = time.perf_counter() - t0
+            rate = (done - done_before) / max(el, 1e-9)
+            eta = (n - done) / max(rate, 1e-9)
+            print(f"    chunk {ci + 1}/{nchunks}  {done}/{n}  {rate:.2f}/s"
+                  f"  elapsed {el:.0f}s  ETA {eta:.0f}s", flush=True)
+    finally:
+        if pool is not None:
+            pool.close()
+            pool.join()
+    print(f"  all chunks in {time.perf_counter() - t0:.0f}s", flush=True)
+    return samples
+
+
+def merge_chunks(out_dir, out_h5, prefix: str = "chunk"):
+    """Concatenate the chunk files of a one-pass scan into a single file."""
+    files = sorted(Path(out_dir).glob(f"{prefix}_*.h5"))
+    if not files:
+        raise FileNotFoundError(f"no {prefix}_*.h5 chunks under {out_dir}")
+    print(f"  merging {len(files)} chunks", flush=True)
+    parts = [load_scan_h5(f) for f in files]
+    flat = {
+        "samples": np.concatenate([p["samples"] for p in parts]),
+        "profile": {k: np.concatenate([p["profile"][k] for p in parts])
+                    for k in parts[0]["profile"]},
+        "scalars": {k: np.concatenate([p["scalars"][k] for p in parts])
+                    for k in parts[0]["scalars"]},
+        "config": parts[0].get("config", {}),
+    }
+    save_scan_h5(Path(out_h5), flat)
+    print(f"  merged -> {out_h5}", flush=True)
+    return flat
+
+
+def merge_dual_chunks(out_dir, out_h5, prefix: str = "chunk"):
+    """Concatenate the dual-axis side files of a one-pass scan (if any)."""
+    files = sorted(Path(out_dir).glob(f"dual_{prefix}_*.h5"))
+    if not files:
+        print("  no dual-axis side files", flush=True)
+        return None
+    parts = []
+    for f in files:
+        with h5py.File(f, "r") as h:
+            parts.append({k: h[k][:] for k in
+                          ("samples", "branch_reach", "branch_R", "branch_Z",
+                           "n_branches")})
+    n = sum(len(p["samples"]) for p in parts)
+    maxb = max(p["branch_reach"].shape[1] for p in parts)
+    out = {k: np.full((n, maxb), np.nan) for k in
+           ("branch_reach", "branch_R", "branch_Z")}
+    out["samples"] = np.concatenate([p["samples"] for p in parts])
+    out["n_branches"] = np.concatenate([p["n_branches"] for p in parts])
+    k = 0
+    for p in parts:
+        m = len(p["samples"])
+        for key in ("branch_reach", "branch_R", "branch_Z"):
+            out[key][k:k + m, :p[key].shape[1]] = p[key]
+        k += m
+    with h5py.File(out_h5, "w") as h:
+        for key, val in out.items():
+            h.create_dataset(key, data=val)
+    print(f"  dual-axis: {n} configurations -> {out_h5}", flush=True)
+    return out
+
+
 def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
               seed: int = 0, processes: int = 0,
               samples: Optional[np.ndarray] = None,
               output_h5: Optional[Path] = None,
+              dual_axis_h5: Optional[Path] = None,
               progress_interval: int = 500) -> dict:
     """Run stage 1 over a Sobol set (or an explicit sample list) and save it."""
     bounds = np.asarray(bounds, dtype=np.float64)
@@ -827,6 +1024,8 @@ def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
         v = scal["reach"][np.isfinite(scal["reach"])]
         print("    reach distribution:", {round(float(x), 2): int((np.abs(v - x) < 1e-9).sum())
                                           for x in np.unique(v)}, flush=True)
+    if dual_axis_h5 is not None:
+        _save_dual_axis(samples, res, cfg, Path(dual_axis_h5))
     if output_h5 is not None:
         path = Path(output_h5)
         path.parent.mkdir(parents=True, exist_ok=True)

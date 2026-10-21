@@ -405,7 +405,9 @@ def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm,
     -------
     volume, am, iota  -- or (volume, am, iota, info) with ``return_status``.
     """
-    info = {"ok": False, "simple": False, "iota": np.nan, "why": ""}
+    info = {"ok": False, "simple": False, "iota": np.nan, "why": "",
+            "elongation": np.nan, "aspect": np.nan,
+            "R_span": np.nan, "Z_span": np.nan}
     if int(nphi) < 3 or int(nturn) < 2:
         info["why"] = "degenerate nturn/nphi"
         out = (np.nan, np.nan, np.nan)
@@ -456,6 +458,18 @@ def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm,
         out = (np.nan, np.nan, np.nan)
         return out + (info,) if return_status else out
 
+    # --- elongation and aspect ratio of the poloidal cross-section --------
+    # elongation = vertical extent / horizontal extent of the section, averaged
+    # over the toroidal angle; aspect = R0 / minor radius (the usual A = R/a).
+    # Both are shape descriptors of THIS surface, so the caller decides which
+    # surface it wants them for (the workflow uses the LCFS).
+    r_span = R.max(axis=1) - R.min(axis=1)
+    z_span = Z.max(axis=1) - Z.min(axis=1)
+    good_span = r_span > 1e-12
+    if np.any(good_span):
+        info["R_span"] = float(np.mean(r_span))
+        info["Z_span"] = float(np.mean(z_span))
+        info["elongation"] = float(np.mean(z_span[good_span] / r_span[good_span]))
     # --- volume: solid of revolution of the sorted sections ---------------
     # The summand is (R_{i+1}^2 - R_i^2)(Z_{i+1} + Z_i), i.e. TWICE the
     # shoelace-type element needed by Pappus (dV = 2*pi*R*dA), hence the /2.
@@ -467,6 +481,8 @@ def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm,
     vol_sum = np.sum((Rn - Rs) * (Rn + Rs) * (Zn + Zs))
     volume = abs(vol_sum) * (np.pi / (2.0 * nphi))
     am = np.sqrt(volume / (2 * np.pi**2 * Rm))
+    if am > 0:
+        info["aspect"] = float(Rm / am)
     out = (float(volume), float(am), float(iota))
     return out + (info,) if return_status else out
 

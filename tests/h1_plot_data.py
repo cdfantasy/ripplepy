@@ -1,409 +1,510 @@
 #!/usr/bin/env python3
-"""Publication-quality figures for the staged current scan.
+"""Publication figures for the one-pass H1 scan (PNG only).
 
-Two independent figures, one per stage:
+Input: ``tests/h1_full_scan/scan_all.h5`` -- the output of the one-pass scan
+(axis + walk + eps on every surface).  Optional: ``eps_refine.h5`` with the
+full-tier re-measurement of the best configurations; when present its numbers
+are printed for reference.
 
-  fig_axis   (stage 1, axis_pilot.h5)   where in the box a REAL magnetic axis
-                                        exists, and how many branches there are
-  fig_depth  (stage 2, depth_map.h5)    how deep each column survives, its
-                                        geometry, the gate margins, and the
-                                        depth map in a 2D slice of the box
+Terminology:
 
-  python -u tests/h1_plot_data.py
+  * a CONFIGURATION is one set of coil currents (one Sobol sample);
+  * a MAGNETIC SURFACE (or just surface) is one flux surface of a
+    configuration.  A usable configuration contributes a set of continuously
+    nested surfaces, the outermost being the LCFS.
+
+ε shown here comes from the walk tier (nturn=200, npart=500): it is meant for
+ranking and for ε(a) maps; absolute values are ~20 % below the full tier, which
+``eps_refine.h5`` corrects for the best candidates.
+
+Figures
+  fig_axis_reach      6 panels: any two currents vs the real-axis reach
+  fig_axis_summary    reach histogram, fixed-point count, axis radius
+  fig_depth_surface   6 panels: any two currents vs the LCFS minor radius
+  fig_depth_physics   LCFS a distribution and a vs dr / iota / mirror ratio
+  fig_eps_surface     6 panels: any two currents vs eps at a = A0
+  fig_eps_physics     eps distribution, V vs iota, a vs elongation
+  fig_qc              gate and resolution diagnostics
+
+  python -u tests/h1_plot_data.py                # all figures
+  python -u tests/h1_plot_data.py --only eps     # one group
 """
 
 from __future__ import annotations
 
+import argparse
+import itertools
 from pathlib import Path
 
-import numpy as np
 import h5py
+import numpy as np
+from scipy.spatial import cKDTree
 
-from ripplepy.plotting import PUB_COLORS, save_figure, setup_publication_style
+from ripplepy.plotting import PUB_COLORS, setup_publication_style
 
-setup_publication_style()          # must precede pyplot (Agg backend)
-import matplotlib.pyplot as plt                             # noqa: E402
-from matplotlib.colors import BoundaryNorm, ListedColormap  # noqa: E402
+setup_publication_style()                       # must precede pyplot (Agg)
+import matplotlib.pyplot as plt                                          # noqa: E402
+from matplotlib.cm import ScalarMappable                                 # noqa: E402
+from matplotlib.colors import BoundaryNorm, ListedColormap, LogNorm, Normalize
 
 BASE = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-AXIS_H5 = BASE / "tests" / "h1_radial_scan" / "axis_pilot.h5"
-DEPTH_H5 = BASE / "tests" / "h1_radial_scan" / "depth_map.h5"
-EPS_H5 = BASE / "tests" / "h1_radial_scan" / "eps_ref.h5"
-OUTDIR = BASE / "tests" / "h1_radial_scan" / "figs"
+DATA_DIR = BASE / "tests" / "h1_full_scan"
+SCAN_H5 = DATA_DIR / "scan_all.h5"
+REFINE_H5 = DATA_DIR / "eps_refine.h5"
+OUTDIR = DATA_DIR / "figs"
 
-A0 = 0.10               # reference minor radius used by stage 3 (vertical line)
-N_PROFILE_LINES = 60    # how many columns to draw in the profile panel
+BOUNDS = np.array([
+    [50000.0, 50000.0],      # coil 0: TF, fixed
+    [0.0, 10000.0],          # coil 1
+    [0.0, 10000.0],          # coil 2
+    [-100000.0, 0.0],        # coil 3
+    [-100000.0, 0.0],        # coil 4
+])
+FREE = np.array([1, 2, 3, 4])
+PAIRS = list(itertools.combinations(range(len(FREE)), 2))
+
+A0 = 0.10               # reference minor radius for the config-level eps
+REACH_CLASSES = np.array([0.0, 0.02, 0.04])
 DPI = 300
+QC_MAX = 1.5
+N_TREND = 8
 
-COIL_LABELS = ("$I_1$ [kA]", "$I_2$ [kA]", "$I_3$ [kA]", "$I_4$ [kA]")
-COIL_KEYS = (1, 2, 3, 4)          # free coils in the samples array
+CMAP_LEN = "viridis"
+CMAP_EPS = "viridis_r"          # low eps = bright
+NORM_LEN = Normalize(0.0, 0.25)
+CMAP_IOTA = "viridis"
+NORM_IOTA = Normalize(0.4, 1.8)
+CMAP_V = "viridis"
+NORM_V = Normalize(0.0, 1.2)
+REACH_CMAP = ListedColormap(["0.84",
+                             plt.get_cmap(CMAP_LEN)(0.55),
+                             plt.get_cmap(CMAP_LEN)(0.95)])
+
+COIL = lambda k: f"$I_{k+1}$ [kA]"
 
 
 # ---------------------------------------------------------------------------
-# helpers
+# loading
 # ---------------------------------------------------------------------------
-def _panel(ax, label):
-    ax.text(0.015, 0.985, label, transform=ax.transAxes, ha="left", va="top",
-            fontsize=11, fontweight="bold", zorder=10,
-            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.2))
+def load_data(path=SCAN_H5):
+    with h5py.File(path, "r") as f:
+        S = f["samples"][:]
+        sc = {k: f["scalars"][k][:] for k in f["scalars"]}
+        prof = {k: f["profile"][k][:] for k in f["profile"]}
+    ok = prof["status"] == 0
+    ci, _ = np.nonzero(ok)
+    surf = {k: v[ok] for k, v in prof.items()}
+    surf["config"] = ci
+
+    # config-level reference surface: the valid face closest to a = A0
+    n = len(S)
+    ref = {k: np.full(n, np.nan) for k in
+           ("eps", "a", "dr", "iota", "volume", "drift", "elongation")}
+    for i in range(n):
+        m = np.isfinite(prof["a"][i]) & ok[i]
+        if not m.any():
+            continue
+        j = np.flatnonzero(m)[int(np.argmin(np.abs(prof["a"][i][m] - A0)))]
+        for k in ref:
+            ref[k][i] = prof[k][i, j] if k in prof else np.nan
+    e = ref["eps"]
+    good = np.isfinite(e) & (e > 0)
+    lo, hi = np.percentile(e[good], [2, 98])
+    norm_eps = LogNorm(max(lo, 1e-3), hi)
+    return {"samples": S, "scalars": sc, "profile": prof, "surf": surf,
+            "ref": ref, "ref_ok": good, "norm_eps": norm_eps}
 
 
-def _cbar(fig, mappable, ax, label, as_title=False, **kw):
-    """Colorbar with the label on the right (or on top when space is tight)."""
-    cb = fig.colorbar(mappable, ax=ax, fraction=0.046, pad=0.03, **kw)
-    if as_title:
-        cb.ax.set_title(label, fontsize=8, pad=4)
+def kA(S, idx):
+    return S[:, FREE[idx]] / 1e3
+
+
+def kA_range(idx):
+    return (BOUNDS[FREE[idx], 0] / 1e3, BOUNDS[FREE[idx], 1] / 1e3)
+
+
+def panel(ax, label):
+    kw = dict(transform=ax.transAxes, ha="left", va="top", fontsize=11,
+              fontweight="bold", zorder=10,
+              bbox=dict(facecolor="white", edgecolor="none", alpha=0.85,
+                        pad=1.2))
+    if hasattr(ax, "text2D"):
+        ax.text2D(0.015, 0.985, label, **kw)
     else:
-        cb.set_label(label, labelpad=5)
-        cb.ax.yaxis.set_label_position("right")
+        ax.text(0.015, 0.985, label, **kw)
+
+
+def cbar(fig, mappable, ax, label, **kw):
+    cb = fig.colorbar(mappable, ax=ax, fraction=0.046, pad=0.03, **kw)
+    cb.set_label(label, labelpad=6)
+    cb.ax.yaxis.set_label_position("right")
     cb.outline.set_linewidth(0.6)
     return cb
 
 
-def _kA(x):
-    return np.asarray(x, dtype=float) / 1e3
+def trend(x, y, n_bins=N_TREND):
+    ok = np.isfinite(x) & np.isfinite(y)
+    if ok.sum() < n_bins * 3:
+        return np.array([]), np.array([])
+    q = np.quantile(x[ok], np.linspace(0, 1, n_bins + 1))
+    xs, ys = [], []
+    for lo, hi in zip(q[:-1], q[1:]):
+        m = ok & (x >= lo) & (x <= hi)
+        if m.sum() >= 3:
+            xs.append(np.median(x[m]))
+            ys.append(np.median(y[m]))
+    return np.array(xs), np.array(ys)
 
 
-def _load_h5(path):
-    with h5py.File(path, "r") as f:
-        return {k: f[k][:] for k in f.keys()}
+def save(fig, stem):
+    Path(OUTDIR).mkdir(parents=True, exist_ok=True)
+    out = Path(OUTDIR) / f"{stem}.png"
+    fig.savefig(out, dpi=DPI, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  -> {out}")
 
 
-# ---------------------------------------------------------------------------
-# figure 1: stage 1, the axis region
-# ---------------------------------------------------------------------------
-def fig_axis(path=AXIS_H5, outdir=OUTDIR):
-    d = _load_h5(Path(path))
-    S = d["samples"]
-    reach = d["reach"]
-    n_axes = d["n_axes"]
-    axisR = d["axis_R"]
-    n = len(S)
-    real = reach > 0
-
+def pair_scatter(S, z, zlabel, cmap, norm, fname, title):
     fig, axs = plt.subplots(2, 3, figsize=(13.0, 7.0))
-    fig.subplots_adjust(hspace=0.35, wspace=0.38)
+    fig.subplots_adjust(hspace=0.35, wspace=0.30)
+    for k, (i, j) in enumerate(PAIRS):
+        ax = axs.flat[k]
+        sc_ = ax.scatter(kA(S, i), kA(S, j), c=z, s=2.5, cmap=cmap,
+                         norm=norm, linewidths=0, rasterized=True)
+        ax.set_xlabel(COIL(i))
+        ax.set_ylabel(COIL(j))
+        panel(ax, f"({chr(97 + k)})")
+    cb = fig.colorbar(sc_, ax=axs.ravel().tolist(), fraction=0.02, pad=0.02)
+    cb.set_label(zlabel, labelpad=6)
+    cb.ax.yaxis.set_label_position("right")
+    cb.outline.set_linewidth(0.6)
+    fig.suptitle(title, y=1.00, fontsize=12)
+    save(fig, fname)
 
-    # (a) reach classes
-    ax = axs[0, 0]
-    vals, cnts = np.unique(reach[np.isfinite(reach)], return_counts=True)
+
+# ---------------------------------------------------------------------------
+# figure 1: real-axis reach against any two currents
+# ---------------------------------------------------------------------------
+def fig_axis_reach(d):
+    S, sc = d["samples"], d["scalars"]
+    reach = np.where(np.isfinite(sc["axis_reach"]) & (sc["axis_reach"] > 0),
+                     sc["axis_reach"], 0.0)
+    norm = BoundaryNorm([-0.01, 0.01, 0.03, 0.05], REACH_CMAP.N)
+    fig, axs = plt.subplots(2, 3, figsize=(13.0, 7.0))
+    fig.subplots_adjust(hspace=0.35, wspace=0.30)
+    for k, (i, j) in enumerate(PAIRS):
+        ax = axs.flat[k]
+        ax.scatter(kA(S, i), kA(S, j), c=reach, cmap=REACH_CMAP, norm=norm,
+                   s=1.5, linewidths=0, rasterized=True)
+        ax.set_xlabel(COIL(i))
+        ax.set_ylabel(COIL(j))
+        panel(ax, f"({chr(97 + k)})")
+    cb = fig.colorbar(ScalarMappable(norm=norm, cmap=REACH_CMAP),
+                      ax=axs.ravel().tolist(), fraction=0.02, pad=0.02,
+                      ticks=REACH_CLASSES)
+    cb.set_label("axis reach [m]", labelpad=6)
+    cb.ax.yaxis.set_label_position("right")
+    cb.outline.set_linewidth(0.6)
+    fig.suptitle(f"real magnetic axis: {100 * np.mean(reach > 0):.1f}% of "
+                 f"{len(S):,} configurations", y=1.00, fontsize=12)
+    print(f"[axis_reach] {len(S):,} configurations")
+    save(fig, "fig_axis_reach")
+
+
+# ---------------------------------------------------------------------------
+# figure 2: axis summary
+# ---------------------------------------------------------------------------
+def fig_axis_summary(d):
+    S, sc = d["samples"], d["scalars"]
+    reach = np.where(np.isfinite(sc["axis_reach"]), sc["axis_reach"], np.nan)
+    reach = np.where(np.isnan(reach), -1.0, reach)
+    n_fix = sc["axis_count"]
+    axisR = sc["axis_R"]
+    fig, axs = plt.subplots(1, 3, figsize=(13.0, 3.6))
+    fig.subplots_adjust(wspace=0.30)
+
+    ax = axs[0]
+    vals, cnts = np.unique(np.where(reach > 0, reach, 0.0), return_counts=True)
     bars = ax.bar([f"{v:.2f}" for v in vals], cnts,
-                  color=[PUB_COLORS["red"], PUB_COLORS["orange"],
-                         PUB_COLORS["green"]][:len(vals)],
+                  color=[REACH_CMAP(i) for i in range(len(vals))],
                   edgecolor="k", linewidth=0.6)
     for b, c in zip(bars, cnts):
         ax.text(b.get_x() + b.get_width() / 2, b.get_height(),
-                f"{100.0 * c / n:.1f}%", ha="center", va="bottom", fontsize=9)
-    ax.set_xlabel("column reach after the real-axis probe [m]")
-    ax.set_ylabel("samples")
-    ax.set_title(f"axis region: {100.0 * real.sum() / n:.1f}% reach $>$ 0")
-    _panel(ax, "(a)")
+                f"{100.0 * c / len(S):.1f}%", ha="center", va="bottom",
+                fontsize=9)
+    ax.set_xlabel("axis reach [m]")
+    ax.set_ylabel("configurations")
+    ax.set_title(f"real axis: {100.0 * np.mean(reach > 0):.1f}%")
+    panel(ax, "(a)")
 
-    # (b) number of one-turn fixed points
-    ax = axs[0, 1]
-    vals, cnts = np.unique(n_axes[np.isfinite(n_axes)], return_counts=True)
+    ax = axs[1]
+    vals, cnts = np.unique(n_fix[np.isfinite(n_fix)], return_counts=True)
     ax.bar([f"{int(v)}" for v in vals], cnts, color=PUB_COLORS["blue"],
            edgecolor="k", linewidth=0.6)
     ax.set_xlabel("distinct one-turn fixed points")
-    ax.set_ylabel("samples")
-    ax.set_title(f"multi-axis: {100.0 * np.mean(n_axes > 1):.1f}%")
-    _panel(ax, "(b)")
+    ax.set_ylabel("configurations")
+    ax.set_title(f"multi-axis candidates: {100.0 * np.mean(n_fix > 1):.1f}%")
+    panel(ax, "(b)")
 
-    # (c) axis radius
-    ax = axs[0, 2]
+    ax = axs[2]
     bins = np.linspace(1.08, 1.38, 31)
-    ax.hist(axisR[np.isfinite(axisR)], bins=bins, color="0.75",
-            edgecolor="k", linewidth=0.4, label="all")
-    ax.hist(axisR[real], bins=bins, color=PUB_COLORS["green"],
+    ax.hist(axisR[np.isfinite(axisR)], bins=bins, color="0.75", edgecolor="k",
+            linewidth=0.4, label="all")
+    ax.hist(axisR[reach > 0], bins=bins, color=PUB_COLORS["blue"],
             edgecolor="k", linewidth=0.4, alpha=0.9, label="reach $>$ 0")
-    ax.set_xlabel("axis $R$ [m]")
-    ax.set_ylabel("samples")
-    ax.legend(frameon=False, loc="upper right", fontsize=8)
-    ax.set_title("where the axis sits")
-    _panel(ax, "(c)")
-
-    # (d)-(f) 2D slices of the 4D box, colour = reach class
-    cmap = ListedColormap([PUB_COLORS["red"], PUB_COLORS["orange"],
-                           PUB_COLORS["green"]])
-    norm = BoundaryNorm([-0.01, 0.01, 0.03, 0.05], cmap.N)
-    pairs = [(0, 2), (1, 3), (2, 3)]
-    labels = ["(d)", "(e)", "(f)"]
-    for k, ((i, j), lab) in enumerate(zip(pairs, labels)):
-        ax = axs[1, k]
-        bg = ~real
-        ax.scatter(_kA(S[bg, COIL_KEYS[i]]), _kA(S[bg, COIL_KEYS[j]]),
-                   s=1.4, c="0.86", linewidths=0, rasterized=True, zorder=1)
-        sc = ax.scatter(_kA(S[real, COIL_KEYS[i]]), _kA(S[real, COIL_KEYS[j]]),
-                        s=2.5, c=reach[real], cmap=cmap, norm=norm,
-                        linewidths=0, rasterized=True, zorder=2)
-        ax.set_xlabel(COIL_LABELS[COIL_KEYS[i] - 1])
-        ax.set_ylabel(COIL_LABELS[COIL_KEYS[j] - 1])
-        _panel(ax, lab)
-    _cbar(fig, sc, axs[1, 2], "probe reach [m]", ticks=[0.0, 0.02, 0.04])
-
-    print(f"[axis] {n} samples, real axis {int(real.sum())} "
-          f"({100.0 * real.sum() / n:.1f}%), multi-axis "
-          f"{100.0 * np.mean(n_axes > 1):.1f}%")
-    out = Path(outdir) / "fig_axis"
-    Path(outdir).mkdir(parents=True, exist_ok=True)
-    save_figure(fig, out, dpi=DPI)
-    plt.close(fig)
-    print(f"[axis] -> {out}.pdf / .png")
+    ax.set_xlabel("axis $R$ at the outboard crossing [m]")
+    ax.set_ylabel("configurations")
+    ax.legend(frameon=False, fontsize=8, loc="upper right")
+    panel(ax, "(c)")
+    print(f"[axis_summary] {len(S):,} configurations")
+    save(fig, "fig_axis_summary")
 
 
 # ---------------------------------------------------------------------------
-# figure 2: stage 2, the depth map
+# figure 3: LCFS minor radius against any two currents
 # ---------------------------------------------------------------------------
-def fig_depth(path=DEPTH_H5, outdir=OUTDIR):
-    from ripplepy.radial_scan import load_scan_h5
-    d = load_scan_h5(Path(path))
-    s, p = d["scalars"], d["profile"]
-    S = d["samples"]
-    dr, a, V = s["lcfs_dr"], s["lcfs_a"], s["lcfs_volume"]
-    iota, gap = s["lcfs_iota"], s["lcfs_gap_norm"]
-    ok = np.isfinite(dr) & (dr > 0) & np.isfinite(a)
-    n = len(dr)
+def fig_depth_surface(d):
+    a = d["scalars"]["lcfs_a"]
+    good = np.isfinite(a) & (a > 0)
+    print(f"[depth_surface] {int(good.sum()):,} configurations with an LCFS")
+    pair_scatter(d["samples"][good], a[good], "$a_\\mathrm{LCFS}$ [m]",
+                 CMAP_LEN, NORM_LEN, "fig_depth_surface",
+                 f"LCFS minor radius of {int(good.sum()):,} configurations")
+
+
+# ---------------------------------------------------------------------------
+# figure 4: depth physics
+# ---------------------------------------------------------------------------
+def fig_depth_physics(d):
+    surf = d["surf"]
+    a, dr, io = surf["a"], surf["dr"], surf["iota"]
+    bmin, bmax = surf["Bmin"], surf["Bmax"]
+    mirror = (bmax - bmin) / (bmax + bmin)
+    eps = surf["eps"]
+    good = np.isfinite(a) & (a > 0)
+    have = good & np.isfinite(eps) & (eps > 0)
+
+    fig = plt.figure(figsize=(13.0, 7.0))
+    fig.subplots_adjust(hspace=0.38, wspace=0.32)
+
+    ax = fig.add_subplot(2, 2, 1)
+    lc = d["scalars"]["lcfs_a"]
+    lc = lc[np.isfinite(lc) & (lc > 0)]
+    ax.hist(lc, bins=np.linspace(0, 0.25, 41), color=PUB_COLORS["blue"],
+            edgecolor="k", linewidth=0.3)
+    ax.set_xlabel("$a_\\mathrm{LCFS}$ [m]")
+    ax.set_ylabel("configurations")
+    ax.set_title(f"{len(lc):,} LCFS")
+    panel(ax, "(a)")
+
+    panels = [(dr, "$dr$ [m]", "(b)"),
+              (io, r"$\iota$", "(c)"),
+              (mirror, "mirror ratio $(B_\\mathrm{max}-B_\\mathrm{min})/"
+                       "(B_\\mathrm{max}+B_\\mathrm{min})$", "(d)")]
+    for k, (y, ylabel, lab) in enumerate(panels):
+        ax = fig.add_subplot(2, 2, k + 2)
+        m = good & np.isfinite(y)
+        ax.scatter(a[m & ~have], y[m & ~have], s=1.5, c="0.85",
+                   linewidths=0, rasterized=True, zorder=1)
+        sc_ = ax.scatter(a[m & have], y[m & have], s=2, c=eps[m & have],
+                         cmap=CMAP_EPS, norm=d["norm_eps"], linewidths=0,
+                         rasterized=True, zorder=2)
+        ax.set_xlabel("minor radius $a$ [m]")
+        ax.set_ylabel(ylabel)
+        panel(ax, lab)
+    cb = fig.colorbar(sc_, ax=[fig.axes[i] for i in (1, 2, 3)],
+                      fraction=0.025, pad=0.02)
+    cb.set_label(r"$\varepsilon_\mathrm{eff}^{3/2}$ (walk tier)",
+                 labelpad=6)
+    cb.ax.yaxis.set_label_position("right")
+    cb.outline.set_linewidth(0.6)
+    print(f"[depth_physics] {int(good.sum()):,} surfaces, "
+          f"{int(have.sum()):,} with eps")
+    save(fig, "fig_depth_physics")
+
+
+# ---------------------------------------------------------------------------
+# figure 5: eps at the reference surface against any two currents
+# ---------------------------------------------------------------------------
+def fig_eps_surface(d):
+    ref, ok = d["ref"], d["ref_ok"]
+    a_med = np.median(ref["a"][ok])
+    print(f"[eps_surface] {int(ok.sum()):,} configurations with eps at "
+          f"a ~ {A0} m")
+    pair_scatter(d["samples"][ok], ref["eps"][ok],
+                 r"$\varepsilon_\mathrm{eff}^{3/2}$", CMAP_EPS,
+                 d["norm_eps"], "fig_eps_surface",
+                 f"$\\varepsilon_\\mathrm{{eff}}^{{3/2}}$ on the "
+                 f"$a={a_med:.3f}$ m surface, {int(ok.sum()):,} configurations")
+
+
+# ---------------------------------------------------------------------------
+# figure 6: eps against the other physical quantities
+# ---------------------------------------------------------------------------
+def fig_eps_physics(d):
+    ref, ok = d["ref"], d["ref_ok"]
+    sc = d["scalars"]
+    eps = ref["eps"]
+    V = sc["lcfs_volume"]
+    a_lcfs = sc["lcfs_a"]
+    elong = sc["lcfs_elongation"]
+    iota = ref["iota"]
+
+    fig, axs = plt.subplots(1, 3, figsize=(14.0, 4.4))
+    fig.subplots_adjust(wspace=0.34)
+
+    ax = axs[0]
+    bins = np.linspace(0, min(np.nanmax(eps[ok]), 1.5), 40)
+    ax.hist(eps[ok], bins=bins, color=PUB_COLORS["blue"], edgecolor="k",
+            linewidth=0.3)
+    ax.set_xlabel(r"$\varepsilon_\mathrm{eff}^{3/2}$")
+    ax.set_ylabel("configurations")
+    panel(ax, "(a)")
+
+    panels = [(iota, V, rf"$\iota$ at the $a={np.median(ref['a'][ok]):.3f}$ m"
+               " surface", "LCFS volume $V$ [m$^3$]", "(b)"),
+              (a_lcfs, elong, "LCFS minor radius $a$ [m]",
+               "elongation", "(c)")]
+    for k, (x, y, xlabel, ylabel, lab) in enumerate(panels):
+        ax = axs[k + 1]
+        m = ok & np.isfinite(x) & np.isfinite(y)
+        sc_ = ax.scatter(x[m], y[m], c=eps[m], cmap=CMAP_EPS,
+                         norm=d["norm_eps"], s=6, linewidths=0,
+                         rasterized=True)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(ylabel)
+        panel(ax, lab)
+    cb = fig.colorbar(sc_, ax=axs[1:].tolist(), fraction=0.05, pad=0.03)
+    cb.set_label(r"$\varepsilon_\mathrm{eff}^{3/2}$", labelpad=6)
+    cb.ax.yaxis.set_label_position("right")
+    cb.outline.set_linewidth(0.6)
+    print(f"[eps_physics] {int(ok.sum()):,} configurations")
+    save(fig, "fig_eps_physics")
+
+
+# ---------------------------------------------------------------------------
+# figure 7: gate and resolution diagnostics
+# ---------------------------------------------------------------------------
+def fig_qc(d):
+    prof = d["profile"]
+    ok = prof["status"] == 0
+    res, gn = prof["residual"][ok], prof["gap_norm"][ok]
+    drift = prof["gradpsi_drift"][ok]
+    m = np.isfinite(res) & np.isfinite(gn)
 
     fig, axs = plt.subplots(2, 3, figsize=(13.0, 7.0))
-    fig.subplots_adjust(hspace=0.35, wspace=0.38)
+    fig.subplots_adjust(hspace=0.38, wspace=0.34)
 
-    # (a) depth histogram
     ax = axs[0, 0]
-    ax.hist(dr[ok], bins=np.arange(0.0, 0.185, 0.01), color=PUB_COLORS["blue"],
-            edgecolor="k", linewidth=0.4)
-    ax.axvline(np.median(dr[ok]), color=PUB_COLORS["red"], ls="--", lw=1.2,
-               label=f"median {np.median(dr[ok]):.3f} m")
-    ax.set_xlabel("LCFS depth  $dr$ [m]")
-    ax.set_ylabel("columns")
-    ax.legend(frameon=False, loc="upper right", fontsize=8)
-    ax.set_title(f"{int(ok.sum())}/{n} columns with a nested column")
-    _panel(ax, "(a)")
+    ax.hist(res[m], bins=np.linspace(0, 0.05, 60), color=PUB_COLORS["blue"],
+            edgecolor="k", linewidth=0.3)
+    ax.axvline(0.05, color=PUB_COLORS["red"], ls="--", lw=1.0)
+    ax.set_xlabel("Poincar\u00e9-section fit residual (gate 0.05)")
+    ax.set_ylabel("surfaces")
+    panel(ax, "(a)")
 
-    # (b) minor radius vs depth, coloured by iota
     ax = axs[0, 1]
-    sc = ax.scatter(dr[ok], a[ok], c=iota[ok], s=6, cmap="viridis",
-                    linewidths=0, rasterized=True)
-    ax.set_xlabel("LCFS depth  $dr$ [m]")
-    ax.set_ylabel("LCFS minor radius  $a$ [m]")
-    _cbar(fig, sc, ax, r"$\iota$")
-    _panel(ax, "(b)")
+    ax.hist(gn[m], bins=np.linspace(0, 15, 60), color=PUB_COLORS["blue"],
+            edgecolor="k", linewidth=0.3)
+    ax.axvline(15.0, color=PUB_COLORS["red"], ls="--", lw=1.0)
+    ax.set_yscale("log")
+    ax.set_xlabel(r"gap$_\mathrm{norm}$ (gate 15)")
+    ax.set_ylabel("surfaces")
+    panel(ax, "(b)")
 
-    # (c) size plane
     ax = axs[0, 2]
-    sc = ax.scatter(a[ok], V[ok], c=dr[ok], s=6, cmap="magma",
-                    linewidths=0, rasterized=True)
-    ax.set_xlabel("LCFS minor radius  $a$ [m]")
-    ax.set_ylabel("LCFS volume  $V$ [m$^3$]")
-    _cbar(fig, sc, ax, "depth $dr$ [m]")
-    _panel(ax, "(c)")
-
-    # (d) radial profiles of a random subset
-    ax = axs[1, 0]
-    okrow = p["status"] == 0
-    rng = np.random.default_rng(0)
-    cols = rng.choice(np.flatnonzero(ok), size=min(N_PROFILE_LINES, ok.sum()),
-                      replace=False)
-    dr_grid = np.arange(0.02, 0.31, 0.02)
-    curves = []
-    for i in cols:
-        x = p["dr"][i]
-        y = p["a"][i]
-        m = np.isfinite(x) & np.isfinite(y) & okrow[i]
-        if m.sum() < 2:
-            continue
-        ax.plot(x[m], y[m], color="0.72", lw=0.5, zorder=1)
-        yy = np.interp(dr_grid, x[m], y[m], left=np.nan, right=np.nan)
-        if np.isfinite(yy).sum() >= 2:
-            curves.append(yy)
-    if curves:
-        arr = np.array(curves)
-        cnt = np.isfinite(arr).sum(axis=0)
-        med = np.full(arr.shape[1], np.nan)
-        med[cnt >= 3] = np.nanmedian(arr[:, cnt >= 3], axis=0)
-        ax.plot(dr_grid, med, color=PUB_COLORS["red"], lw=2.0, zorder=3,
-                label="median")
-        ax.legend(frameon=False, loc="upper left", fontsize=8)
-    ax.set_xlabel("$dr$ [m]")
-    ax.set_ylabel("$a$ [m]")
-    ax.set_xlim(0, 0.19)
-    ax.set_title(f"$a(dr)$ for {len(curves)} columns")
-    _panel(ax, "(d)")
-
-    # (e) gate margins of the accepted faces
-    ax = axs[1, 1]
-    res = p["residual"][okrow]
-    gn = p["gap_norm"][okrow]
-    m = np.isfinite(res) & np.isfinite(gn)
-    nb = 32 if m.sum() > 500 else 16
-    h = ax.hist2d(gn[m], res[m], bins=(nb, nb), cmap="Greys", cmin=0.5,
+    h = ax.hist2d(gn[m], res[m], bins=(40, 40), cmap="Greys", cmin=0.5,
                   range=[[0, 16], [0, 0.06]])
     ax.axhline(0.05, color=PUB_COLORS["red"], ls="--", lw=1.0)
     ax.axvline(15.0, color=PUB_COLORS["red"], ls="--", lw=1.0)
-    ax.set_xlabel(r"gap$_\mathrm{norm}$  (gate 15)")
-    ax.set_ylabel(r"residual (gate 0.05)")
-    _cbar(fig, h[3], ax, "faces", as_title=True)
-    ax.set_title(f"{int(m.sum())} accepted faces")
-    _panel(ax, "(e)")
+    cb = cbar(fig, h[3], ax, "surfaces")
+    cb.ax.set_title("")
+    ax.set_xlabel(r"gap$_\mathrm{norm}$")
+    ax.set_ylabel("residual")
+    panel(ax, "(c)")
 
-    # (f) depth map in a 2D slice
-    ax = axs[1, 2]
-    ax.scatter(_kA(S[~ok, 1]), _kA(S[~ok, 3]), s=1.4, c="0.86",
-               linewidths=0, rasterized=True, zorder=1)
-    sc = ax.scatter(_kA(S[ok, 1]), _kA(S[ok, 3]), c=dr[ok], s=6,
-                    cmap="viridis", linewidths=0, rasterized=True)
-    _cbar(fig, sc, ax, "depth $dr$ [m]")
-    ax.set_xlabel(COIL_LABELS[0])
-    ax.set_ylabel(COIL_LABELS[2])
-    ax.set_title("depth map (2 of 4 dimensions)")
-    _panel(ax, "(f)")
-
-    print(f"[depth] {int(ok.sum())}/{n} columns; depth med "
-          f"{np.median(dr[ok]):.3f} m; a med {np.median(a[ok]):.3f} m; "
-          f"V med {np.median(V[ok]):.3f} m^3")
-    out = Path(outdir) / "fig_depth"
-    Path(outdir).mkdir(parents=True, exist_ok=True)
-    save_figure(fig, out, dpi=DPI)
-    plt.close(fig)
-    print(f"[depth] -> {out}.pdf / .png")
-
-
-# ---------------------------------------------------------------------------
-# figure 3: stage 3, the eps field at the reference surface
-# ---------------------------------------------------------------------------
-def fig_eps(path=EPS_H5, outdir=OUTDIR):
-    with h5py.File(Path(path), "r") as f:
-        S = f["samples"][:]
-        r = {k: f["ref"][k][:] for k in f["ref"]}
-        a0 = float(f.attrs["a0"])
-    e, V, io = r["eps"], r["volume"], r["iota"]
-    qc, st = r["gradpsi_drift"], r["status"]
-    has = np.isfinite(e)
-    clean = has & np.isfinite(qc) & (qc <= 1.5)
-    print(f"[eps] {len(e)} measured, {int(has.sum())} with eps, "
-          f"{int(clean.sum())} clean (drift <= 1.5)")
-
-    fig, axs = plt.subplots(2, 3, figsize=(13.5, 7.0))
-    fig.subplots_adjust(hspace=0.35, wspace=0.52)
-
-    # (a) eps distribution, all vs clean
-    ax = axs[0, 0]
-    bins = np.linspace(0, min(np.nanmax(e[has]), 1.5), 40)
-    ax.hist(e[has], bins=bins, color="0.75", edgecolor="k", linewidth=0.4,
-            label="all")
-    ax.hist(e[clean], bins=bins, color=PUB_COLORS["blue"], edgecolor="k",
-            linewidth=0.4, alpha=0.85, label="drift $\\leq$ 1.5")
-    ax.set_xlabel(rf"$\varepsilon_\mathrm{{eff}}^{{3/2}}$ at $a={a0:.2f}$ m")
-    ax.set_ylabel("columns")
-    ax.legend(frameon=False, fontsize=8, loc="upper right")
-    _panel(ax, "(a)")
-
-    # (b) eps vs volume, with the lower envelope
-    ax = axs[0, 1]
-    ax.scatter(V[has], e[has], s=8, c="0.7", linewidths=0, rasterized=True)
-    ax.scatter(V[clean], e[clean], s=9, c=PUB_COLORS["blue"], linewidths=0,
-               rasterized=True)
-    if clean.any():
-        o = np.argsort(V[clean])
-        vv, ee = V[clean][o], e[clean][o]
-        env, best = [], np.inf
-        for x, y in zip(vv, ee):
-            if y < best:
-                best = y
-                env.append((x, y))
-        env = np.array(env)
-        ax.plot(env[:, 0], env[:, 1], "-", color=PUB_COLORS["red"], lw=1.6,
-                label="lower envelope")
-        ax.legend(frameon=False, fontsize=8)
-    ax.set_xlabel(r"LCFS volume  $V$ [m$^3$]")
-    ax.set_ylabel(rf"$\varepsilon_\mathrm{{eff}}^{{3/2}}$ at $a={a0:.2f}$ m")
-    _panel(ax, "(b)")
-
-    # (c) QC vs eps
-    ax = axs[0, 2]
-    ax.scatter(qc[has], e[has], s=8, c="0.7", linewidths=0, rasterized=True)
-    ax.axvline(1.5, color=PUB_COLORS["red"], ls="--", lw=1.0)
-    ax.set_xlabel(r"grad-$\psi$ drift (last/first decile)")
-    ax.set_ylabel(rf"$\varepsilon_\mathrm{{eff}}^{{3/2}}$")
-    ax.set_title(f"{int(has.sum() - clean.sum())} flagged as corrupted")
-    _panel(ax, "(c)")
-
-    # (d) local smoothness: eps difference to the nearest neighbour
     ax = axs[1, 0]
-    from scipy.spatial import cKDTree
-    span = np.ptp(S[:, 1:], axis=0)
-    span[span <= 0] = 1.0
-    U = S[clean][:, 1:] / span
-    Ec = e[clean]
-    if len(U) > 10:
-        d, j = cKDTree(U).query(U, k=2)
-        d, j = d[:, 1], j[:, 1]
-        diff = np.abs(Ec - Ec[j]) / np.maximum(Ec, 1e-9)
-        ax.scatter(Ec, diff, s=8, c="0.6", linewidths=0, rasterized=True)
-        q = np.quantile(Ec, np.linspace(0, 1, 7))
-        xs, ys = [], []
-        for lo, hi in zip(q[:-1], q[1:]):
-            m = (Ec >= lo) & (Ec < hi)
-            if m.sum() > 3:
-                xs.append(0.5 * (lo + hi))
-                ys.append(np.median(diff[m]))
-        ax.plot(xs, ys, "o-", color=PUB_COLORS["red"], lw=1.6,
-                label="median")
-        ax.set_yscale("log")
-        ax.legend(frameon=False, fontsize=8)
-        print(f"[eps] nearest-neighbour eps difference: median "
-              f"{np.median(diff) * 100:.1f}%, p90 {np.percentile(diff, 90) * 100:.1f}%")
-    ax.set_xlabel(rf"$\varepsilon_\mathrm{{eff}}^{{3/2}}$ at $a={a0:.2f}$ m")
-    ax.set_ylabel("relative difference to nearest neighbour")
-    _panel(ax, "(d)")
+    dv = drift[np.isfinite(drift)]
+    ax.hist(dv, bins=np.linspace(0, 3, 60), color=PUB_COLORS["blue"],
+            edgecolor="k", linewidth=0.3)
+    ax.axvline(QC_MAX, color=PUB_COLORS["red"], ls="--", lw=1.0)
+    ax.set_yscale("log")
+    ax.set_xlabel("grad-$\\psi$ drift (last/first decile)")
+    ax.set_ylabel("surfaces")
+    panel(ax, "(d)")
 
-    # (e) where the good columns are
     ax = axs[1, 1]
-    ax.scatter(_kA(S[has, 1]), _kA(S[has, 3]), c="0.85", s=3,
-               linewidths=0, rasterized=True, zorder=1)
-    sc = ax.scatter(_kA(S[clean, 1]), _kA(S[clean, 3]), c=Ec, s=9,
-                    cmap="viridis_r", linewidths=0, rasterized=True, zorder=2,
-                    vmin=np.percentile(Ec, 2), vmax=np.percentile(Ec, 98))
-    _cbar(fig, sc, ax, r"$\varepsilon_\mathrm{{eff}}^{{3/2}}$")
-    ax.set_xlabel(COIL_LABELS[0])
-    ax.set_ylabel(COIL_LABELS[2])
-    _panel(ax, "(e)")
+    ref, ok_ref = d["ref"], d["ref_ok"]
+    S = d["samples"][ok_ref]
+    U = (S[:, FREE] - BOUNDS[FREE, 0]) / (BOUNDS[FREE, 1] - BOUNDS[FREE, 0])
+    _, jj = cKDTree(U).query(U, k=2)
+    eps = ref["eps"]
+    rel = np.abs(eps[ok_ref] - eps[ok_ref][jj[:, 1]]) / eps[ok_ref]
+    ax.scatter(eps[ok_ref], rel, s=3, c="0.55", linewidths=0, rasterized=True)
+    xs, ys = trend(eps[ok_ref], rel)
+    if len(xs):
+        ax.plot(xs, ys, "o-", color=PUB_COLORS["red"], lw=1.4, ms=4)
+    ax.set_yscale("log")
+    ax.set_xlabel(r"$\varepsilon_\mathrm{eff}^{3/2}$")
+    ax.set_ylabel(r"$|\Delta\varepsilon|/\varepsilon$ to nearest neighbour")
+    panel(ax, "(e)")
 
-    # (f) eps vs iota
     ax = axs[1, 2]
-    sc = ax.scatter(io[clean], Ec, c=V[clean], s=9, cmap="magma",
-                    linewidths=0, rasterized=True)
-    _cbar(fig, sc, ax, r"$V$ [m$^3$]")
-    ax.set_xlabel(r"$\iota$ at the reference surface")
-    ax.set_ylabel(rf"$\varepsilon_\mathrm{{eff}}^{{3/2}}$")
-    _panel(ax, "(f)")
-
-    out = Path(outdir) / "fig_eps"
-    Path(outdir).mkdir(parents=True, exist_ok=True)
-    save_figure(fig, out, dpi=DPI)
-    plt.close(fig)
-    print(f"[eps] -> {out}.pdf / .png")
-    if clean.any():
-        k = int(np.nanargmin(np.where(clean, e, np.nan)))
-        print(f"[eps] best: eps={e[k]:.6f} V={V[k]:.3f} iota={io[k]:.3f} "
-              f"QC={qc[k]:.2f} extcur={np.round(S[k], 1).tolist()}")
-    miss = ~has
-    if miss.any():
-        for code, name in enumerate(("ok", "trace_fail", "residual", "gap",
-                                     "bad_geom")):
-            c = int(np.sum(st[miss] == code))
-            if c:
-                print(f"[eps] missing-eps reason {name}: {c}")
+    names = ["ok", "trace", "residual", "gap", "geometry"]
+    counts = [int((prof["status"] == k).sum()) for k in range(5)]
+    ax.bar(names, counts, color=[PUB_COLORS["blue"], PUB_COLORS["orange"],
+                                 PUB_COLORS["red"], PUB_COLORS["magenta"],
+                                 PUB_COLORS["black"]], edgecolor="k",
+           linewidth=0.6)
+    ax.set_yscale("log")
+    ax.set_ylabel("surfaces (log)")
+    ax.set_title(f"{int(ok.sum()):,} accepted / "
+                 f"{int(np.isfinite(prof['status']).sum()):,} measured")
+    panel(ax, "(f)")
+    print(f"[qc] {int(ok.sum()):,} accepted surfaces")
+    save(fig, "fig_qc")
 
 
 # ---------------------------------------------------------------------------
+def _refine_note():
+    if not REFINE_H5.exists():
+        return
+    with h5py.File(REFINE_H5, "r") as f:
+        e = f["eps_a0"][:]
+        w = f["eps_a0_walk"][:]
+        el = f["eps_lcfs"][:]
+    m = np.isfinite(e) & np.isfinite(w) & (w > 0)
+    if m.any():
+        r = e[m] / w[m]
+        print(f"[refine] {int(m.sum())} full-tier points: best eps(a0) = "
+              f"{np.nanmin(e):.4f}, full/walk median {np.median(r):.3f}")
+    if np.isfinite(el).any():
+        print(f"[refine] eps at the LCFS: median {np.nanmedian(el):.4f}")
+
+
 def main():
-    fig_axis()
-    fig_depth()
-    fig_eps()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", default="all",
+                    choices=["all", "axis", "depth", "eps", "qc"])
+    args = ap.parse_args()
+    print(f"input: {SCAN_H5}")
+    d = load_data()
+    _refine_note()
+    if args.only in ("all", "axis"):
+        fig_axis_reach(d)
+        fig_axis_summary(d)
+    if args.only in ("all", "depth"):
+        fig_depth_surface(d)
+        fig_depth_physics(d)
+    if args.only in ("all", "eps"):
+        fig_eps_surface(d)
+        fig_eps_physics(d)
+    if args.only in ("all", "qc"):
+        fig_qc(d)
 
 
 if __name__ == "__main__":

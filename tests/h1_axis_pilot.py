@@ -59,6 +59,13 @@ PROCESSES = 64            # 0 = serial
 PROGRESS_INTERVAL = 200
 OUTPUT_H5 = BASE / "tests" / "h1_radial_scan" / "axis_pilot.h5"
 
+# Side product: configurations where TWO axis branches both pass the probe.
+# H1 is known to have configurations with two magnetic axes; the main pipeline
+# follows only the deeper branch, so those cases are collected separately here
+# (they do not affect axis_pilot.h5 or any later stage).
+RECORD_DUAL_AXIS = True
+DUAL_AXIS_H5 = BASE / "tests" / "h1_radial_scan" / "dual_axis.h5"
+
 
 # ---------------------------------------------------------------------------
 def main():
@@ -67,6 +74,7 @@ def main():
         rmin=RMIN, rmax=RMAX, rstep=RSTEP, axis_nphi=AXIS_NPHI,
         n_axis_tries=N_AXIS_TRIES,
         axis_probe_dr=AXIS_PROBE_DR, axis_probe_nturn=AXIS_PROBE_NTURN,
+        axis_record_branches=RECORD_DUAL_AXIS,
     )
     width = 22
     print("=" * width + " stage-1 axis pilot " + "=" * width)
@@ -79,12 +87,15 @@ def main():
           f" up to {N_AXIS_TRIES} branches per sample")
     print(f"  real-axis test: column must reach dr={AXIS_PROBE_DR}"
           f" at nturn={AXIS_PROBE_NTURN}")
+    print(f"  dual-axis      " + ("recorded -> " + str(DUAL_AXIS_H5.name)
+                                  if RECORD_DUAL_AXIS else "off"))
     print("=" * (2 * width + 20))
 
     t0 = time.perf_counter()
     probe_box(cfg, BOUNDS, n_samples=N_SAMPLES, seed=SEED,
               processes=PROCESSES, samples=SAMPLES,
               output_h5=Path(OUTPUT_H5),
+              dual_axis_h5=Path(DUAL_AXIS_H5) if RECORD_DUAL_AXIS else None,
               progress_interval=PROGRESS_INTERVAL)
     print(f"  done in {time.perf_counter() - t0:.0f}s")
 
