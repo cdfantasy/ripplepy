@@ -104,19 +104,35 @@ def load_data(path=SCAN_H5):
     surf = {k: v[ok] for k, v in prof.items()}
     surf["config"] = ci
 
-    # config-level reference surface: the valid face closest to a = A0
     n = len(S)
+    # config-level reference values, interpolated to exactly a = A0.  Picking
+    # the nearest face is not good enough: the radial grid is coarse, so the
+    # nearest face sits anywhere in [0.082, 0.116] and eps changes by ~20% per
+    # 0.01 m there.
     ref = {k: np.full(n, np.nan) for k in
-           ("eps", "a", "dr", "iota", "volume", "drift", "elongation")}
+           ("eps", "a", "dr", "iota", "volume", "gradpsi_drift",
+            "elongation")}
     for i in range(n):
-        # require the column to reach A0 (otherwise the closest face is a
-        # smaller plasma's LCFS and the radii would be mixed)
-        m = ok[i] & np.isfinite(prof["a"][i]) & (prof["a"][i] >= 0.95 * A0)
-        if not m.any():
+        m = ok[i] & np.isfinite(prof["a"][i]) & (prof["a"][i] > 0)
+        if m.sum() < 2:
             continue
-        j = np.flatnonzero(m)[int(np.argmin(np.abs(prof["a"][i][m] - A0)))]
-        for k in ref:
-            ref[k][i] = prof[k][i, j] if k in prof else np.nan
+        am = prof["a"][i][m]
+        em = prof["eps"][i][m]
+        o = np.argsort(am)
+        am, em = am[o], em[o]
+        if not (am[0] < A0 < am[-1] or np.any(np.abs(am - A0) < 1e-6)):
+            continue
+        idx = np.flatnonzero(m)[o]
+        if not (np.isfinite(em).all() and em.min() > 0):
+            continue
+        ref["eps"][i] = float(np.exp(np.interp(A0, am, np.log(em))))
+        ref["a"][i] = A0
+        for k in ("dr", "iota", "volume", "elongation"):
+            v = prof[k][i][idx]
+            if np.isfinite(v).all():
+                ref[k][i] = float(np.interp(A0, am, v))
+        j = int(np.argmin(np.abs(am - A0)))
+        ref["gradpsi_drift"][i] = prof["gradpsi_drift"][i][idx[j]]
     e = ref["eps"]
     good = np.isfinite(e) & (e > 0)
     lo, hi = np.percentile(e[good], [2, 98])

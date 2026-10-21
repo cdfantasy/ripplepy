@@ -74,7 +74,15 @@ FIT_TRANSFORMS = ("log", "identity")   # both are tried; the better CV wins
 
 # ---------------------------------------------------------------------------
 def load_reference(path=SCAN_H5, a0=A0):
-    """Per-configuration eps on the surface closest to a = a0."""
+    """Interpolate every surface quantity to exactly a = a0.
+
+    Picking the nearest face is NOT good enough: the radial grid is coarse
+    (dr = 0.02 plus one bisection), so the nearest face to a0 sits anywhere in
+    [0.082, 0.116], and eps varies steeply with radius (d ln eps / da ~ 19/m,
+    i.e. a 0.01 m offset is a 20% change).  That jitter would contaminate the
+    model.  Since the walk stores every surface, each quantity is interpolated
+    along the column instead, which needs the column to bracket a0.
+    """
     with h5py.File(path, "r") as f:
         S = f["samples"][:]
         keys = ("a", "eps", "gradpsi_drift", "dr", "iota", "volume",
@@ -86,14 +94,26 @@ def load_reference(path=SCAN_H5, a0=A0):
            ("eps", "a", "dr", "iota", "volume", "elongation",
             "gradpsi_drift")}
     for i in range(n):
-        # the column must actually reach a0; otherwise the closest face would be
-        # the LCFS of a smaller plasma and the radii would be mixed
-        m = (ok[i] & np.isfinite(prof["a"][i]) & (prof["a"][i] >= 0.95 * a0))
-        if not m.any():
+        m = ok[i] & np.isfinite(prof["a"][i]) & (prof["a"][i] > 0)
+        if m.sum() < 2:
             continue
-        j = np.flatnonzero(m)[int(np.argmin(np.abs(prof["a"][i][m] - a0)))]
-        for k in ref:
-            ref[k][i] = prof[k][i, j]
+        am = prof["a"][i][m]
+        em = prof["eps"][i][m]
+        if not (np.isfinite(em).all() and em.min() > 0):
+            continue
+        o = np.argsort(am)
+        am, em = am[o], em[o]
+        if not (am[0] < a0 < am[-1] or np.any(np.abs(am - a0) < 1e-6)):
+            continue
+        idx = np.flatnonzero(m)[o]
+        ref["eps"][i] = float(np.exp(np.interp(a0, am, np.log(em))))
+        ref["a"][i] = a0
+        for k in ("dr", "iota", "volume", "elongation"):
+            v = prof[k][i][idx]
+            if np.isfinite(v).all():
+                ref[k][i] = float(np.interp(a0, am, v))
+        j = int(np.argmin(np.abs(am - a0)))     # drift is a QC ratio
+        ref["gradpsi_drift"][i] = prof["gradpsi_drift"][i][idx[j]]
     return S, ref
 
 
