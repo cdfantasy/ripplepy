@@ -26,7 +26,7 @@ import numpy as np
 
 from ripplepy import initialize_mgrid_field, set_extcur
 from ripplepy.radial_scan import (ScanConfig, TIER_FULL, _axis_ref,
-                                  load_scan_h5, measure_surface)
+                                  fmt_duration, load_scan_h5, measure_surface)
 
 BASE = Path(__file__).resolve().parent.parent
 
@@ -139,14 +139,16 @@ def main():
                     start=1):
                 res[pos] = out
                 if k % 50 == 0:
-                    print(f"    {k}/{len(tasks)}  {time.perf_counter() - t0:.0f}s",
+                    print(f"    {k}/{len(tasks)}  "
+                          f"{fmt_duration(time.perf_counter() - t0)}",
                           flush=True)
     else:
         _init(cfg)
         for pos, task in enumerate(tasks):
             _, out = _measure_one(task)
             res[pos] = out
-    print(f"  measured in {time.perf_counter() - t0:.0f}s", flush=True)
+    print(f"  measured in {fmt_duration(time.perf_counter() - t0)}",
+          flush=True)
 
     # ---- collect and save ------------------------------------------------
     rows = [(t[0], r) for t, r in zip(tasks, res) if r is not None]

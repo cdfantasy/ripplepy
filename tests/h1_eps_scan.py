@@ -31,8 +31,8 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ripplepy.radial_scan import (
-    ScanConfig, _worker_init, load_scan_h5, measure_reference)
+from ripplepy.radial_scan import (ScanConfig, _worker_init, fmt_duration,
+                                  load_scan_h5, measure_reference)
 
 BASE = Path(__file__).resolve().parent.parent
 
@@ -169,7 +169,8 @@ def _run_eps(depth: dict, idx: np.ndarray, a0: float, cfg: ScanConfig):
                 if PROGRESS_INTERVAL and k % PROGRESS_INTERVAL == 0:
                     el = time.perf_counter() - t0
                     print(f"    {k}/{len(tasks)}  {k / max(el, 1e-9):.2f}/s"
-                          f"  {el:.0f}s  ETA {el / k * (len(tasks) - k):.0f}s",
+                          f"  {fmt_duration(el)}"
+                          f"  ETA {fmt_duration(el / k * (len(tasks) - k))}",
                           flush=True)
 
     keys = ("dr", "a", "eps", "eps_defect", "gradpsi_drift", "residual",

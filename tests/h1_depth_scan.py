@@ -22,7 +22,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
-from ripplepy.radial_scan import ScanConfig, scan_box
+from ripplepy.radial_scan import ScanConfig, fmt_duration, scan_box
 
 BASE = Path(__file__).resolve().parent.parent
 
@@ -113,7 +113,7 @@ def main():
     scan_box(cfg, BOUNDS, samples=samples, processes=PROCESSES,
              output_h5=Path(OUTPUT_H5), progress_interval=PROGRESS_INTERVAL,
              eps_at_a=None)
-    print(f"  done in {time.perf_counter() - t0:.0f}s")
+    print(f"  done in {fmt_duration(time.perf_counter() - t0)}")
 
 
 if __name__ == "__main__":

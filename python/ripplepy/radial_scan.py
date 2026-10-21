@@ -109,6 +109,18 @@ PROFILE_FIELDS = (
 )
 
 
+def fmt_duration(seconds: float) -> str:
+    """Human-readable duration, e.g. ``2h 05m``, ``12m 30s``, ``8.4s``."""
+    sec = float(max(seconds, 0.0))
+    hours = int(sec // 3600)
+    minutes = int((sec % 3600) // 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes:
+        return f"{minutes}m {sec % 60:04.1f}s"
+    return f"{sec:.1f}s"
+
+
 @dataclass
 class ScanConfig:
     """All knobs of the radial scan oracle."""
@@ -692,7 +704,8 @@ def scan_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 256,
             if progress_interval > 0 and (k + 1) % progress_interval == 0:
                 el = time.perf_counter() - t0
                 print(f"    {k + 1}/{n}  {k / max(el, 1e-9):.1f} samples/s"
-                      f"  elapsed {el:.0f}s  ETA {el / (k + 1) * (n - k - 1):.0f}s",
+                      f"  elapsed {fmt_duration(el)}"
+                      f"  ETA {fmt_duration(el / (k + 1) * (n - k - 1))}",
                       flush=True)
     else:
         tasks = [(k, samples[k]) for k in range(n)]
@@ -707,8 +720,9 @@ def scan_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 256,
                 if progress_interval > 0 and done % progress_interval == 0:
                     el = time.perf_counter() - t0
                     print(f"    {done}/{n}  {done / max(el, 1e-9):.1f} samples/s"
-                          f"  elapsed {el:.0f}s"
-                          f"  ETA {el / done * (n - done):.0f}s", flush=True)
+                          f"  elapsed {fmt_duration(el)}"
+                          f"  ETA {fmt_duration(el / done * (n - done))}",
+                          flush=True)
 
     flat = _flat_results(samples, results, cfg)
     if output_h5 is not None:
@@ -726,7 +740,8 @@ def _report(flat: dict, elapsed: float):
     n_ok = int(np.sum(codes == CFG_OK))
     n_max = int(np.sum(codes == CFG_HIT_DRMAX))
     has_eps = np.isfinite(s["ref_eps"])
-    print(f"  {n} samples in {elapsed:.0f}s ({elapsed / max(n, 1):.2f} s/sample)"
+    print(f"  {n} samples in {fmt_duration(elapsed)}"
+          f" ({elapsed / max(n, 1):.2f} s/sample)"
           f": axis {n_axis}, LCFS {n_ok}, hit_drmax {n_max},"
           f" eps measured {int(has_eps.sum())}", flush=True)
     good = np.isfinite(s["lcfs_dr"]) & (s["lcfs_dr"] > 0)
@@ -904,12 +919,14 @@ def scan_all_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
             rate = (done - done_before) / max(el, 1e-9)
             eta = (n - done) / max(rate, 1e-9)
             print(f"    chunk {ci + 1}/{nchunks}  {done}/{n}  {rate:.2f}/s"
-                  f"  elapsed {el:.0f}s  ETA {eta:.0f}s", flush=True)
+                  f"  elapsed {fmt_duration(el)}"
+                  f"  ETA {fmt_duration(eta)}", flush=True)
     finally:
         if pool is not None:
             pool.close()
             pool.join()
-    print(f"  all chunks in {time.perf_counter() - t0:.0f}s", flush=True)
+    print(f"  all chunks in {fmt_duration(time.perf_counter() - t0)}",
+          flush=True)
     return samples
 
 
@@ -987,7 +1004,8 @@ def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
             res[k] = stage1_probe(samples[k], cfg)
             if progress_interval and (k + 1) % progress_interval == 0:
                 el = time.perf_counter() - t0
-                print(f"    {k + 1}/{n}  {k / max(el, 1e-9):.1f}/s  {el:.0f}s",
+                print(f"    {k + 1}/{n}  {k / max(el, 1e-9):.1f}/s"
+                      f"  {fmt_duration(el)}",
                       flush=True)
     else:
         tasks = [(k, samples[k]) for k in range(n)]
@@ -1003,7 +1021,8 @@ def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
                 if progress_interval and done % progress_interval == 0:
                     el = time.perf_counter() - t0
                     print(f"    {done}/{n}  {done / max(el, 1e-9):.1f}/s"
-                          f"  {el:.0f}s  ETA {el / done * (n - done):.0f}s",
+                          f"  {fmt_duration(el)}"
+                          f"  ETA {fmt_duration(el / done * (n - done))}",
                           flush=True)
 
     scal = {k: np.full(n, np.nan) for k in
@@ -1015,7 +1034,8 @@ def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
     n_axis = int(np.sum(scal["n_axes"] > 0))
     n_real = int(np.sum(scal["reach"] > 0))
     n_multi = int(np.sum(scal["n_axes"] > 1))
-    print(f"  {n} samples in {elapsed:.0f}s ({elapsed / max(n, 1):.2f} s/sample)"
+    print(f"  {n} samples in {fmt_duration(elapsed)}"
+          f" ({elapsed / max(n, 1):.2f} s/sample)"
           f": any axis {n_axis} ({100.0 * n_axis / max(n, 1):.1f}%),"
           f" real axis (reach>0) {n_real} ({100.0 * n_real / max(n, 1):.1f}%),"
           f" multi-axis {n_multi} ({100.0 * n_multi / max(n, 1):.1f}%)",

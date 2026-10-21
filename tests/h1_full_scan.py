@@ -26,8 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
-from ripplepy.radial_scan import (ScanConfig, merge_chunks, merge_dual_chunks,
-                                  scan_all_box)
+from ripplepy.radial_scan import (ScanConfig, fmt_duration, merge_chunks,
+                                  merge_dual_chunks, scan_all_box)
 
 BASE = Path(__file__).resolve().parent.parent
 
@@ -38,15 +38,21 @@ MGRID_PATH = BASE / "tests" / "test_file" / "mgrid_h1_design.nc"
 NFP = 3
 FULL_TORUS = False
 
+# The box is NOT the full engineering box any more.  The 65k scan showed that
+# every measured configuration with I1 > 5.5 kA, and every one with I2 > 5 kA,
+# has eps >= 0.23 (the global best is 0.098), while the region that contains the
+# top 10% in eps spans I1 = 1.0-5.2 kA and I2 = 0-4.8 kA; I3 and I4 stay broad
+# (the best solutions cover almost their whole range).  Shrinking only I1 and I2
+# cuts the volume to 23.5% -> 4.3x the density of useful configurations.
 BOUNDS = np.array([
     [50000.0, 50000.0],   # coil 0: TF, fixed at 50 kA
-    [0.0, 10000.0],       # coil 1
-    [0.0, 10000.0],       # coil 2
-    [-100000.0, 0.0],     # coil 3
-    [-100000.0, 0.0],     # coil 4
+    [800.0, 5500.0],      # coil 1  (was 0 .. 10000)
+    [0.0, 5000.0],        # coil 2  (was 0 .. 10000)
+    [-100000.0, 0.0],     # coil 3  (unchanged)
+    [-100000.0, 0.0],     # coil 4  (unchanged)
 ])
 
-N_SAMPLES = 65536
+N_SAMPLES = 32768
 SEED = 11
 SAMPLES = None            # optional explicit (N, 5) array of absolute currents
 
@@ -107,12 +113,13 @@ def main():
                  samples=SAMPLES, processes=PROCESSES, out_dir=CHUNK_DIR,
                  chunk_size=CHUNK_SIZE,
                  dual_axis_h5=DUAL_H5 if RECORD_DUAL_AXIS else None)
-    print(f"  chunks done in {time.perf_counter() - t0:.0f}s", flush=True)
+    print(f"  chunks done in {fmt_duration(time.perf_counter() - t0)}",
+          flush=True)
 
     merge_chunks(CHUNK_DIR, OUT_H5)
     if RECORD_DUAL_AXIS:
         merge_dual_chunks(CHUNK_DIR, DUAL_H5)
-    print(f"  total {time.perf_counter() - t0:.0f}s")
+    print(f"  total {fmt_duration(time.perf_counter() - t0)}")
 
 
 if __name__ == "__main__":
