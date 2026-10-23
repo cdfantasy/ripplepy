@@ -29,6 +29,20 @@ build_local/
 python/ripplepy/_effective_ripple*.so
 python/ripplepy/effective_ripple.py
 
+# "inplace" editable build artefacts (scikit-build-core builds inside the tree;
+# see pyproject.toml -> tool.scikit-build.editable)
+/.ninja_log
+/.ninja_deps
+/.skbuild-info.json
+/CMakeInit.txt
+/build.ninja
+/python/_effective_ripple*.so
+/python/effective_ripple.py
+/python/f90wrap_ripple.f90
+/python/f2py-build.stamp
+/python/fix_f90wrap_import.py
+/python/.f2py_f2cmap
+
 # Runtime logs / data / plots / CSVs (run outputs never sync to GitHub)
 *.log
 *.h5

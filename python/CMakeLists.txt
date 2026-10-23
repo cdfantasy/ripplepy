@@ -15,6 +15,26 @@ set(FORTRAN_BINARY_DIR ${CMAKE_BINARY_DIR}/fortran)
 set(WRAP_MODULE_NAME effective_ripple)
 set(EXT_MODULE_NAME _effective_ripple)
 
+# Extension suffix of the interpreter doing the build (needed when the f2py
+# output has to be copied into the in-tree package for an inplace editable).
+execute_process(
+    COMMAND ${Python_EXECUTABLE} -c
+            "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))"
+    OUTPUT_VARIABLE PY_EXT_SUFFIX
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# scikit-build-core builds an inplace editable directly in the source tree.
+# In that case the f2py artefacts end up in this directory, but the package
+# that is imported from the tree lives in ``ripplepy/``, so they are copied
+# into it below.  A normal wheel build has a separate binary directory and is
+# unaffected.
+if(CMAKE_CURRENT_BINARY_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(INPLACE_EDITABLE TRUE)
+else()
+    set(INPLACE_EDITABLE FALSE)
+endif()
+
 set(F90WRAP_F90 ${CMAKE_CURRENT_BINARY_DIR}/f90wrap_ripple.f90)
 set(F90WRAP_PY ${CMAKE_CURRENT_BINARY_DIR}/${WRAP_MODULE_NAME}.py)
 set(F2PY_STAMP ${CMAKE_CURRENT_BINARY_DIR}/f2py-build.stamp)
@@ -49,6 +69,19 @@ add_custom_command(
 
 add_custom_target(ripplepy_python_ext ALL DEPENDS ${F2PY_STAMP})
 
+if(INPLACE_EDITABLE)
+    add_custom_command(
+        TARGET ripplepy_python_ext POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_BINARY_DIR}/effective_ripple.py
+                ${PY_PACKAGE_DIR}/effective_ripple.py
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CMAKE_CURRENT_BINARY_DIR}/_effective_ripple${PY_EXT_SUFFIX}
+                ${PY_PACKAGE_DIR}/_effective_ripple${PY_EXT_SUFFIX}
+        COMMENT "Copying inplace editable build artefacts into the package tree"
+    )
+endif()
+
 # Install pure-Python package modules from source tree.
 install(
     FILES
@@ -57,6 +90,8 @@ install(
     ${PY_PACKAGE_DIR}/ripple.py
     ${PY_PACKAGE_DIR}/optimize.py
     ${PY_PACKAGE_DIR}/boozer_eps_verify.py
+    ${PY_PACKAGE_DIR}/radial_scan.py
+    ${PY_PACKAGE_DIR}/plotting.py
     DESTINATION ripplepy
 )
 

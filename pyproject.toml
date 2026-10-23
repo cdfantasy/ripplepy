@@ -36,13 +36,18 @@ plot = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/username/ripplepy"
-Repository = "https://github.com/username/ripplepy.git"
+Homepage = "https://github.com/cdfantasy/ripplepy"
+Repository = "https://github.com/cdfantasy/ripplepy.git"
 
 [tool.scikit-build]
 cmake.version = ">=3.18"
 build-dir = "build/{wheel_tag}"
 wheel.packages = ["python/ripplepy"]
+
+# Editable installs build in the source tree (see python/CMakeLists.txt) so
+# that edits to the Python modules take effect without reinstalling.
+[tool.scikit-build.editable]
+mode = "inplace"
 
 [tool.scikit-build.cmake.define]
 CMAKE_BUILD_TYPE = "Release"
