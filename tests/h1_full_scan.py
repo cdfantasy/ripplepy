@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-pass current scan for H1.
+"""One-pass current scan for H1 (dr_step=0.01, corrected gates).
 
 Everything happens in a single loop over the samples:
 
@@ -15,11 +15,17 @@ The whole run is a single job: the results are collected in memory and written
 once, at the end, to OUT_H5.  There is no resume -- an interrupted run starts
 from scratch.
 
+Modes:
+  default              walk 200/500, eps on every face -> scan_all.h5
+  --nturn 400 --no-eps  feasibility labels only       -> scan_all_dr01_nt400.h5
+
   nohup python -u tests/h1_full_scan.py > tests/h1_full_scan.log 2>&1 &
+  python -u tests/h1_full_scan.py --nturn 400 --no-eps
 """
 
 from __future__ import annotations
 
+import argparse
 import time
 from pathlib import Path
 
@@ -64,11 +70,11 @@ N_AXIS_TRIES = 3
 WALK_EPS = True
 PROFILE_NTURN = 200       # walk-tier trace resolution
 PROFILE_NPART = 500       # eps quadrature at the walk tier
-DR0, DR_STEP, DR_MAX = 0.02, 0.02, 0.60
+DR0, DR_STEP, DR_MAX = 0.02, 0.01, 0.60
 
 # gates
 RESIDUAL_TOL = 0.05
-GAP_NORM_TOL = 15.0
+GAP_NORM_TOL = 1e12   # gap is diagnostic only (corrected gate)
 
 # dual-axis side product
 RECORD_DUAL_AXIS = True
@@ -83,12 +89,31 @@ DUAL_H5 = OUT_DIR / "dual_axis.h5"
 
 # ---------------------------------------------------------------------------
 def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--n", type=int, default=N_SAMPLES, help="number of Sobol points")
+    ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--nturn", type=int, default=PROFILE_NTURN,
+                    help="walk-tier nturn (use 400 for NT400 labels)")
+    ap.add_argument("--npart", type=int, default=PROFILE_NPART)
+    ap.add_argument("--no-eps", action="store_true",
+                    help="do not measure eps (feasibility-label mode)")
+    ap.add_argument("--processes", type=int, default=PROCESSES)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--dual-out", default=None)
+    ap.add_argument("--no-dual", action="store_true")
+    args = ap.parse_args()
+    walk_eps = not args.no_eps
+    out = Path(args.out) if args.out else (
+        OUT_H5 if walk_eps else OUT_DIR / "scan_all_dr01_nt400.h5")
+    dual = None if args.no_dual else Path(
+        args.dual_out if args.dual_out else
+        (DUAL_H5 if walk_eps else OUT_DIR / "dual_axis_dr01_nt400.h5"))
     cfg = ScanConfig(
         mgrid_path=str(MGRID_PATH), nfp=NFP, full_torus=FULL_TORUS,
         rmin=RMIN, rmax=RMAX, rstep=RSTEP, axis_nphi=AXIS_NPHI,
-        n_axis_tries=N_AXIS_TRIES, axis_record_branches=RECORD_DUAL_AXIS,
-        walk_eps=WALK_EPS, profile_nturn=PROFILE_NTURN,
-        profile_npart=PROFILE_NPART, dr0=DR0, dr_step=DR_STEP,
+        n_axis_tries=N_AXIS_TRIES, axis_record_branches=bool(dual),
+        walk_eps=walk_eps, profile_nturn=args.nturn,
+        profile_npart=args.npart, dr0=DR0, dr_step=DR_STEP,
         dr_max=DR_MAX, residual_tol=RESIDUAL_TOL,
         gap_norm_tol=GAP_NORM_TOL,
     )
@@ -96,20 +121,20 @@ def main():
     print("=" * width + " one-pass H1 scan " + "=" * width)
     print(f"  mgrid    {MGRID_PATH}")
     print(f"  box      " + ", ".join(f"[{lo:.0f},{hi:.0f}]" for lo, hi in BOUNDS))
-    print(f"  samples  Sobol {N_SAMPLES}, seed {SEED}")
+    print(f"  samples  Sobol {args.n}, seed {args.seed}")
     print(f"  axis     R {RMIN}..{RMAX} step {RSTEP}, up to {N_AXIS_TRIES}"
-          f" branches, dual-axis {'recorded' if RECORD_DUAL_AXIS else 'off'}")
+          f" branches, dual-axis {'recorded' if dual else 'off'}")
     print(f"  walk     dr {DR0}..{DR_MAX} step {DR_STEP};"
-          f" eps on every surface = {WALK_EPS}"
-          f" (nturn={PROFILE_NTURN}, npart={PROFILE_NPART})")
-    print(f"  output   {OUT_DIR}")
+          f" eps on every surface = {walk_eps}"
+          f" (nturn={args.nturn}, npart={args.npart})")
+    print(f"  output   {out}")
     print("=" * (2 * width + 24), flush=True)
 
     t0 = time.perf_counter()
-    scan_all_box(cfg, BOUNDS, n_samples=N_SAMPLES, seed=SEED,
-                 samples=SAMPLES, processes=PROCESSES,
-                 output_h5=OUT_H5,
-                 dual_axis_h5=DUAL_H5 if RECORD_DUAL_AXIS else None,
+    scan_all_box(cfg, BOUNDS, n_samples=args.n, seed=args.seed,
+                 samples=SAMPLES, processes=args.processes,
+                 output_h5=out,
+                 dual_axis_h5=dual,
                  progress_interval=PROGRESS_INTERVAL)
     print(f"  total {fmt_duration(time.perf_counter() - t0)}")
 

@@ -100,63 +100,6 @@ def set_trace_parameters(nturn, nphi, npart=5000, verbose=True):
         print(f"✓ Trace parameters set: nturn={nturn}, nphi={nphi}{part_str}")
 
 
-def fieldline_smoothness_flag(fieldline_data, nturn, nphi,
-                               drift_r_frac=0.02, drift_z_abs=0.02,
-                               max_step=0.10):
-    """Fast smoothness / confinement check for a traced field line.
-
-    This is intentionally a cheap O(npoints) numpy pass — orders of
-    magnitude faster than `trace_gradpsi_internal` itself — and is meant to
-    be used as a first-pass oracle for island mapping.  It does not attempt a
-    full Poincare analysis; it only rejects lines that are clearly not
-    confined to a smooth surface:
-
-      * non-finite or zero-filled data
-      * an unphysically large single-step jump in (R, Z)
-      * monotonic/random drift of the per-turn mean R
-      * per-turn mean Z drifting off the Z=0 symmetry plane
-
-    Returns True when the line looks like a regular confined field line.
-    Thresholds are deliberately loose; ambiguous lines pass this check and
-    can be re-tested with a higher-level criterion later.
-    """
-    if fieldline_data is None or fieldline_data.size == 0:
-        return False
-    R = np.asarray(fieldline_data[:, 0], dtype=np.float64)
-    Z = np.asarray(fieldline_data[:, 1], dtype=np.float64)
-    n = int(nturn) * int(nphi)
-    if R.size < n or Z.size < n:
-        return False
-    if not (np.isfinite(R).all() and np.isfinite(Z).all()):
-        return False
-    if np.all(R == 0.0) and np.all(Z == 0.0):
-        return False
-
-    # 1) Single-step jump: a field line is integrated with small steps, so a
-    #    jump of several cm between consecutive points indicates escape or
-    #    an interpolation discontinuity.
-    if R.size > 1:
-        dR = np.abs(np.diff(R))
-        dZ = np.abs(np.diff(Z))
-        if float(dR.max()) > float(max_step) or float(dZ.max()) > float(max_step):
-            return False
-
-    # 2) Per-turn mean R drift: on a smooth flux surface the turn-averaged
-    #    R is stationary; a stochastic/escaping line wanders.
-    n_turns = R.size // int(nphi)
-    if n_turns >= 3:
-        turn_R = R[:n_turns * int(nphi)].reshape(n_turns, int(nphi))
-        turn_Z = Z[:n_turns * int(nphi)].reshape(n_turns, int(nphi))
-        mean_R = turn_R.mean(axis=1)
-        mean_Z = turn_Z.mean(axis=1)
-        r0 = float(np.mean(mean_R))
-        drift_r = float(np.max(mean_R) - np.min(mean_R))
-        if drift_r > max(drift_r_frac * max(r0, 1e-12), 0.005):
-            return False
-        if float(np.max(np.abs(mean_Z))) > float(drift_z_abs):
-            return False
-
-    return True
 
 
 def fieldline_smoothness_poincare(fieldline_data, nturn, nphi,
@@ -353,8 +296,78 @@ def _polygon_is_simple(X, Y):
     return not bool(np.any(inter & ~near))
 
 
+def calculate_toroidal_flux(fieldline_data, axis_data, nturn, nphi, extcur,
+                            phi_deg=0.0, grid=90, return_status=False):
+    """Toroidal flux through the phi=const poloidal section of a traced surface.
+
+    The section contour is built from all traced points at that toroidal
+    angle, B_phi is interpolated on a regular (R, Z) grid, and the flux is
+    integrated only over the polygon interior.  This is a geometric/field
+    integral, not a VMEC flux coordinate; check ``phi_deg`` consistency before
+    using it as a strict flux label.
+
+    Returns
+    -------
+    flux : float  (Wb, signed according to B_phi orientation)
+    info : dict   (only with return_status=True)
+    """
+    info = {"ok": False, "why": "", "phi_deg": float(phi_deg),
+            "n_points": 0, "area": np.nan, "Bphi_min": np.nan,
+            "Bphi_max": np.nan}
+    fld = np.asarray(fieldline_data, dtype=np.float64)
+    if fld.ndim != 2 or fld.shape[1] < 3 or int(nphi) < 3 or int(nturn) < 2:
+        info["why"] = "bad fieldline_data or nturn/nphi"
+        out = (np.nan,)
+        return out + (info,) if return_status else np.nan
+    j = int(round(float(phi_deg) / 360.0 * int(nphi))) % int(nphi)
+    ph = np.mod(fld[:, 2], 2.0 * np.pi)
+    target = 2.0 * np.pi * j / float(nphi)
+    # points in this section (one per toroidal turn, for a closed line)
+    idx = np.flatnonzero(np.abs(np.angle(np.exp(1j * (ph - target)))) < 2.0 * np.pi / nphi * 0.51)
+    if idx.size < max(8, int(nturn) // 4):
+        idx = np.argsort(np.abs(np.angle(np.exp(1j * (ph - target)))))[:int(nturn)]
+    R = fld[idx, 0]; Z = fld[idx, 1]
+    ax = np.asarray(axis_data, dtype=np.float64)
+    aR = float(ax[j % len(ax), 0]); aZ = float(ax[j % len(ax), 1])
+    th = np.arctan2(Z - aZ, R - aR)
+    o = np.argsort(th); R = R[o]; Z = Z[o]
+    if R.size < 3 or not np.all(np.isfinite(R)) or not np.all(np.isfinite(Z)):
+        info["why"] = "no finite contour"
+        out = (np.nan,)
+        return out + (info,) if return_status else np.nan
+    # polygon area (absolute) and simple-polygon guard
+    area = 0.5 * abs(float(np.sum(R * np.roll(Z, -1) - np.roll(R, -1) * Z)))
+    if not np.isfinite(area) or area <= 0:
+        info["why"] = "degenerate contour"
+        out = (np.nan,)
+        return out + (info,) if return_status else np.nan
+    try:
+        from matplotlib.path import Path
+    except Exception:
+        info["why"] = "matplotlib.path unavailable"
+        out = (np.nan,)
+        return out + (info,) if return_status else np.nan
+    pad = 0.03
+    r0, r1 = float(R.min() - pad), float(R.max() + pad)
+    z0, z1 = float(Z.min() - pad), float(Z.max() + pad)
+    nr = nz = int(grid)
+    rr = np.linspace(r0, r1, nr); zz = np.linspace(z0, z1, nz)
+    RR, ZZ = np.meshgrid(rr, zz, indexing="ij")
+    inside = Path(np.column_stack([R, Z])).contains_points(
+        np.column_stack([RR.ravel(), ZZ.ravel()])).reshape(RR.shape)
+    b = get_bfield_matrix(extcur, RR.ravel(), ZZ.ravel(),
+                          np.full(RR.size, target))
+    Bphi = np.asarray(b[:, 2], dtype=np.float64).reshape(RR.shape)
+    dA = (rr[1] - rr[0]) * (zz[1] - zz[0])
+    flux = float(np.sum(Bphi[inside]) * dA)
+    info.update(ok=True, n_points=int(R.size), area=area,
+                Bphi_min=float(np.nanmin(Bphi)), Bphi_max=float(np.nanmax(Bphi)))
+    return (flux, info) if return_status else flux
+
+
 def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm,
-                            return_status=False, iota_bounds=(0.02, 5.0)):
+                            return_status=False, iota_bounds=(0.02, 5.0),
+                            extcur=None, flux_phi_deg=0.0, flux_grid=90):
     """Volume, volume-equivalent minor radius and rotational transform.
 
     The volume is the solid of revolution of the phi = const sections, each
@@ -483,6 +496,15 @@ def calculate_plasma_params(fieldline_data, axis_data, nturn, nphi, Rm,
     am = np.sqrt(volume / (2 * np.pi**2 * Rm))
     if am > 0:
         info["aspect"] = float(Rm / am)
+    if extcur is not None:
+        flux, finfo = calculate_toroidal_flux(
+            fieldline_data, axis_data, nturn, nphi, extcur,
+            phi_deg=flux_phi_deg, grid=flux_grid, return_status=True)
+        info["Phi_tor"] = float(flux)
+        info["Phi_tor_ok"] = bool(finfo["ok"])
+        info["Phi_tor_phi_deg"] = float(flux_phi_deg)
+        info["Phi_tor_area"] = float(finfo["area"])
+        info["Phi_tor_n_points"] = int(finfo["n_points"])
     out = (float(volume), float(am), float(iota))
     return out + (info,) if return_status else out
 
@@ -636,68 +658,6 @@ def _rank_by_residual(rs, z0, nphi):
     return [r for _, r in scored]
 
 
-def find_axis_any(rmin, rmax, rstep, z0=0.0, xtol=1e-6,
-                  max_iter=100, delta_r=0.01, axis_z_tol=1e-6,
-                  nphi=360, verbose=False, scan_center=None,
-                  fail_residual_tol=None):
-    """Scan R at fixed Z and return as soon as one valid axis is found.
-
-    This is the early-exit version of `find_axis_multi_guess`, used when the
-    caller does not care whether several axes exist.  In a box where most
-    samples are axis-feasible it cuts the average axis-scan cost by roughly
-    (rmax-rmin)/rstep, because the scan stops after the first good R guess.
-
-    scan_center : float, optional
-        P1a warm start.  When given, the guess nearest |r - scan_center| is
-        tried first with the full solver gate (fail_residual_tol >= 1.0, so
-        warm hits behave exactly as pre-P2); after it misses, the rest of the
-        window is ranked by one-turn residual (B1) and uses the caller's gate.
-        The window is unchanged -- only the attempt order changes.
-    fail_residual_tol : float, optional
-        Forwarded to `find_axis`: guesses whose best one-turn residual is
-        above this threshold skip the solver entirely.
-    """
-    rs = []
-    r = float(rmin)
-    while r <= float(rmax) + 1e-12:
-        rs.append(r)
-        r += float(rstep)
-
-    def _try(r, fail_tol=None):
-        guess = np.array([r, float(z0)], dtype=np.float64)
-        try:
-            axis_rz, _, _, ok = find_axis(
-                guess, xtol=xtol, max_iter=max_iter, delta_r=delta_r,
-                nphi=nphi, verbose=False,
-                fail_residual_tol=fail_tol)
-        except Exception:
-            axis_rz, ok = None, False
-        return axis_rz, ok
-
-    if scan_center is not None:
-        rs = sorted(rs, key=lambda rr: (abs(rr - scan_center), rr))
-        # Warm guess first with the full pre-P2 solver gate (1.0): restores the
-        # old dense-layer hit behaviour exactly (a warm guess with residual
-        # < 1.0 always gets the solver).  The residual-ranked tail uses the
-        # caller's tighter gate (0.35) to skip hopeless guesses.
-        warm_tol = fail_residual_tol
-        if warm_tol is not None and warm_tol < 1.0:
-            warm_tol = 1.0
-        axis_rz, ok = _try(rs[0], fail_tol=warm_tol)
-        if ok and abs(axis_rz[1]) <= axis_z_tol:
-            return [(float(axis_rz[0]), float(axis_rz[1]))]
-        tail = _rank_by_residual(rs[1:], z0, nphi) if len(rs) > 1 else []
-        for r in tail:
-            axis_rz, ok = _try(r, fail_tol=fail_residual_tol)
-            if ok and abs(axis_rz[1]) <= axis_z_tol:
-                return [(float(axis_rz[0]), float(axis_rz[1]))]
-        return []
-    # No warm start: rank the whole window by residual.
-    for r in _rank_by_residual(rs, z0, nphi):
-        axis_rz, ok = _try(r, fail_tol=fail_residual_tol)
-        if ok and abs(axis_rz[1]) <= axis_z_tol:
-            return [(float(axis_rz[0]), float(axis_rz[1]))]
-    return []
 
 
 def find_axis_multi_guess(rmin, rmax, rstep, z0=0.0, xtol=1e-6,

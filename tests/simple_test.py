@@ -37,11 +37,11 @@ BASE = Path(__file__).resolve().parent.parent
 MGRID_PATH = str(BASE / "tests" / "test_file" / "mgrid_h1_design.nc")
 NFP = 3
 FULL_TORUS = False
-EXTCUR = [50000.0, 5000.0, 0, -80000.0, -40000.0]
-INITIAL_RZ = (1.25, 0.0)
-# EXTCUR = [50000.0, 1193.2, 0.0, -16790.6, -13296.4]
-# INITIAL_RZ = (1.137, 0.0)
-DELTA_R = 0.1      # radial offset of the traced surface from the axis
+# EXTCUR = [50000.0, 5000.0, 5000, -80000.0, -40000.0]
+# INITIAL_RZ = (1.25, 0.0)
+EXTCUR = [50000.0, 3.24e3, 335.0, -64819.6, -75649.9]
+INITIAL_RZ = (1.137, 0.0)
+DELTA_R = 0.08      # radial offset of the traced surface from the axis
 NTURN = 200
 NPHI = 360
 NPART = 5000
@@ -72,7 +72,7 @@ def _trace_section(start):
 def _section_is_smooth(fld, axis_rz):
     """Same phi=0 Poincare FFT test the mapping oracle uses (L2/L3)."""
     smooth, _ = fieldline_smoothness_poincare(
-        fld, POINCARE_NTURN, NPHI, axis_rz=axis_rz, n_harmonics=4,
+        fld, POINCARE_NTURN, NPHI, axis_rz=axis_rz, n_harmonics=8,
         residual_rms_frac_tol=0.05, max_angular_gap=1.0, min_points=16)
     return bool(smooth)
 
@@ -110,7 +110,7 @@ def _plot_radial_poincare(axis_rz, results, outpath, title):
                     vmin=0.0, vmax=DELTA_R)
         n_ok += 1
         _, m = fieldline_smoothness_poincare(
-            fld, POINCARE_NTURN, NPHI, axis_rz=axis_rz, n_harmonics=4,
+            fld, POINCARE_NTURN, NPHI, axis_rz=axis_rz, n_harmonics=8,
             residual_rms_frac_tol=0.05, max_angular_gap=1.0, min_points=16)
         res = m.get("residual_rms_frac", np.nan)
         gap = m.get("max_gap_rad", np.nan)
@@ -176,7 +176,13 @@ def main():
     print(f"  ✓ eps_eff^(3/2) = {eps:.6e}  (time: {elapsed:.2f}s)")
     print(f"  start_rz = ({start_rz[0]:.4f}, {start_rz[1]:.4f})")
 
-    vol,am,iota = calculate_plasma_params(fieldline_data,axis_fieldline,NTURN,NPHI,R0)
+    # calculate_plasma_params expects one-turn axis data with shape (nphi, 2);
+    # find_axis returns a 2-turn field-line array, so slice the axis explicitly.
+    axis_data = np.asarray(axis_fieldline[:NPHI, :2], dtype=np.float64)
+    vol, am, iota, geo = calculate_plasma_params(
+        fieldline_data, axis_data, NTURN, NPHI, R0, return_status=True)
+    if not geo.get("ok", False):
+        print(f"  ⚠ geometry check failed: {geo.get('why', 'unknown')}")
     # am = sqrt(V / (2 pi^2 R0)) is the volume-equivalent MINOR radius; R0
     # (the mean axis radius) is the major radius.
     print(f"Volume  of plasma: {vol:.3e},minor radius = {am:.3e},iota = {iota:.3e}")
@@ -188,6 +194,10 @@ def main():
             # Headless-safe: save an interactive HTML (fig.show() opens a
             # browser and can hang on a server without a display).
             fig.show()
+            # save as a static PNG
+            out = BASE / "tests" / f"fieldline_dr{DELTA_R:g}.png"
+            fig.write_image(str(out), scale=2)
+            print(f"  ✓ 3D plot saved to {out}")
         except ImportError:
             print("  (plotly not installed — install with 'pip install plotly')")
         except Exception as exc:

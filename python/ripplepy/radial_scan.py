@@ -26,9 +26,6 @@ Pipeline per configuration (``scan_config``)
   4. optional: one full-tier eps measurement on the face whose a is closest to
      ``eps_at_a`` (the reference surface used for ranking)
 
-``stage1_probe`` is the even cheaper stage-1 test ("is there a REAL axis
-here?"), used to map the axis region before any depth work.
-
 Gate metrics (both evaluated on the same traced line as eps)
   residual : normalised FFT residual of the phi=0 section.  Measured to be
              resolution independent (0.0445 -> 0.0450 over 5x nturn), so one
@@ -39,8 +36,9 @@ Gate metrics (both evaluated on the same traced line as eps)
              vs 0.089 rad at 400), so a fixed radian threshold would reject
              healthy surfaces at low nturn.  Measured: healthy faces 3.2-6.2
              (10.6 on the tiny innermost face, where the polar origin is off
-             centre), an iota~5/7 face 55.  Threshold 15 keeps both apart and
-             still rejects the 55.
+             centre), an iota~5/7 face 55.  Threshold 15 separates them; the
+             default gate is off (1e12), so gap_norm is normally diagnostic.
+             Strict controls set gap_norm_tol=15 explicitly.
 """
 
 from __future__ import annotations
@@ -147,12 +145,17 @@ class ScanConfig:
     # radial walk
     walk_eps: bool = False     # True = measure eps on EVERY walked surface
     dr0: float = 0.02
-    dr_step: float = 0.02
+    dr_step: float = 0.01  # corrected main-DB resolution
     dr_max: float = 0.60
     # gates
     residual_tol: float = 0.05
-    gap_norm_tol: float = 15.0
-    smooth_n_harmonics: int = 4
+    gap_norm_tol: float = 1e12  # diagnostic only by default; strict controls set 15 explicitly
+    # Independent LCFS criterion: a surface is accepted for LCFS if its
+    # residual passes AND its gap_norm is below this.  This is NOT the global
+    # gap gate (which stays diagnostic); it only stops the radial walk before
+    # an island/angular-hole layer is mistaken for a closed LCFS.
+    lcfs_gap_norm_tol: float = 15.0
+    smooth_n_harmonics: int = 8  # corrected gate: 4 falsely rejects shaped surfaces
     # low-order rational bookkeeping (diagnostic only, no filtering yet)
     rational_qmax: int = 8
     # diagnostic: when a sample has several candidate axes, probe ALL of them
@@ -428,6 +431,13 @@ def _dr_for_a(rows: list[dict], a_target: float):
     return float(np.interp(a_target, a, dr))
 
 
+def _passes_lcfs(row: dict, cfg: "ScanConfig") -> bool:
+    """LCFS acceptance: status OK + finite gap below the LCFS gap threshold."""
+    return (row.get("status") == ST_OK
+            and np.isfinite(row.get("gap_norm", np.nan))
+            and float(row["gap_norm"]) <= float(cfg.lcfs_gap_norm_tol))
+
+
 def scan_config(extcur: np.ndarray, cfg: ScanConfig,
                 eps_at_a: Optional[float] = None) -> dict:
     """Radial scan for one coil-current vector.
@@ -456,7 +466,7 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
     # fixed point also has a nested neighbourhood, and it breaks a few
     # centimetres out.  Both pass |Z| <= tol, so the branch must be chosen by
     # how far its column survives, not by scan order.  This matters: the
-    # early-exit `find_axis_any` returned the first R-scan hit, and for a
+    # early-exit axis search returned the first R-scan hit, and for a
     # measured sample that was the wrong branch (R=1.267 instead of the healthy
     # R=1.125), which silently rejected a good current configuration.
     want_all = bool(getattr(cfg, "axis_record_branches", False)) and len(axes) > 1
@@ -479,7 +489,7 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
                               cfg.profile_npart, TIER_PROFILE, cfg,
                               compute_eps=bool(cfg.walk_eps))
         rows.append(row)
-        if row["status"] != ST_OK:
+        if not _passes_lcfs(row, cfg):
             bracket = (last_ok, dr)
             break
         last_ok = dr
@@ -503,7 +513,7 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
                               cfg.profile_npart, TIER_PROFILE, cfg,
                               compute_eps=bool(cfg.walk_eps))
         rows.append(row)
-        if row["status"] == ST_OK:
+        if _passes_lcfs(row, cfg):
             lo = mid
         else:
             hi = mid
@@ -511,6 +521,9 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
         out["status"] = CFG_OK
 
     out["lcfs_dr"] = float(lcfs_dr)
+    accepted = [float(r["a"]) for r in rows
+                if _passes_lcfs(r, cfg) and np.isfinite(r.get("a", np.nan))]
+    out["lcfs_a"] = max(accepted, default=0.0)
 
     # --- optional: the single full-tier eps measurement, at a = eps_at_a ---
     if eps_at_a is not None:
@@ -530,21 +543,6 @@ def scan_config(extcur: np.ndarray, cfg: ScanConfig,
     return out
 
 
-def measure_reference(extcur: np.ndarray, cfg: ScanConfig, axis_rz,
-                      dr_ref: float) -> Optional[dict]:
-    """One full-tier measurement (with eps) at a known axis and dr.
-
-    Stage 3 knows the axis and the surface it wants (a = a0, taken from the
-    stage-2 depth map), so the walk does not have to be repeated: this measures
-    exactly one face and returns its row.
-    """
-    extcur = np.asarray(extcur, dtype=np.float64)
-    set_extcur(extcur)
-    ax = _axis_ref(np.asarray(axis_rz, dtype=np.float64), cfg.nphi)
-    if ax is None:
-        return None
-    return measure_surface(extcur, ax, float(dr_ref), cfg.full_nturn, cfg.nphi,
-                           cfg.full_npart, TIER_FULL, cfg, compute_eps=True)
 
 
 def _map_config_indexed(args):
@@ -578,8 +576,10 @@ def _flat_results(samples: np.ndarray, results: list[dict], cfg: ScanConfig):
     """Pack per-config results into flat arrays (+ ragged profiles, NaN padded).
 
     Two groups of scalar columns:
-      lcfs_* : geometry of the outermost certified face (from the walk)
-      ref_*  : the single full-tier measurement where eps lives (a = eps_at_a)
+      lcfs_* : geometry of the outermost face accepted by the combined
+               LCFS criterion (residual + gap_norm <= lcfs_gap_norm_tol)
+      ref_*  : the single full-tier measurement where eps lives (a = eps_at_a);
+               all NaN in the default one-pass scan, which has no eps_at_a
     """
     n = len(results)
     nf = cfg.max_faces
@@ -612,9 +612,9 @@ def _flat_results(samples: np.ndarray, results: list[dict], cfg: ScanConfig):
         for j, row in enumerate(rows[:nf]):
             for k in PROFILE_FIELDS:
                 prof[k][i, j] = row[k]
-        # geometry of the outermost certified face
+        # geometry of the outermost LCFS-accepted face (residual + gap)
         for row in reversed(rows):
-            if row["tier"] == TIER_PROFILE and row["status"] == ST_OK:
+            if row["tier"] == TIER_PROFILE and _passes_lcfs(row, cfg):
                 scal["lcfs_a"][i] = row["a"]
                 scal["lcfs_volume"][i] = row["volume"]
                 scal["lcfs_iota"][i] = row["iota"]
@@ -667,69 +667,8 @@ def save_scan_h5(path: Path, flat: dict):
             pass
 
 
-def load_scan_h5(path: Path) -> dict:
-    path = Path(path)
-    with h5py.File(path, "r") as f:
-        flat = {
-            "samples": f["samples"][:],
-            "profile": {k: f["profile"][k][:] for k in f["profile"]},
-            "scalars": {k: f["scalars"][k][:] for k in f["scalars"]},
-            "config": json.loads(f.attrs["config"]),
-        }
-        flat["attrs"] = dict(f.attrs)
-    return flat
 
 
-def scan_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 256,
-             seed: int = 0, processes: int = 0,
-             samples: Optional[np.ndarray] = None,
-             output_h5: Optional[Path] = None,
-             progress_interval: int = 64,
-             eps_at_a: Optional[float] = None) -> dict:
-    """Sample the box (or take ``samples``) and run the radial scan on each."""
-    bounds = np.asarray(bounds, dtype=np.float64)
-    if samples is None:
-        samples = sample_bounds(bounds, n_samples, seed=seed)
-    else:
-        samples = np.asarray(samples, dtype=np.float64)
-    n = int(samples.shape[0])
-    t0 = time.perf_counter()
-    results: list[dict] = [None] * n
-
-    if processes == 0:
-        print(f"  scanning {n} samples serially", flush=True)
-        _worker_init(cfg, eps_at_a)
-        for k in range(n):
-            results[k] = scan_config(samples[k], cfg, eps_at_a)
-            if progress_interval > 0 and (k + 1) % progress_interval == 0:
-                el = time.perf_counter() - t0
-                print(f"    {k + 1}/{n}  {k / max(el, 1e-9):.1f} samples/s"
-                      f"  elapsed {fmt_duration(el)}"
-                      f"  ETA {fmt_duration(el / (k + 1) * (n - k - 1))}",
-                      flush=True)
-    else:
-        tasks = [(k, samples[k]) for k in range(n)]
-        print(f"  scanning {n} samples with {processes} workers", flush=True)
-        with multiprocessing.Pool(processes=processes,
-                                  initializer=_worker_init,
-                                  initargs=(cfg, eps_at_a)) as pool:
-            for done, (idx, res) in enumerate(
-                    pool.imap_unordered(_map_config_indexed, tasks,
-                                        chunksize=1), start=1):
-                results[idx] = res
-                if progress_interval > 0 and done % progress_interval == 0:
-                    el = time.perf_counter() - t0
-                    print(f"    {done}/{n}  {done / max(el, 1e-9):.1f} samples/s"
-                          f"  elapsed {fmt_duration(el)}"
-                          f"  ETA {fmt_duration(el / done * (n - done))}",
-                          flush=True)
-
-    flat = _flat_results(samples, results, cfg)
-    if output_h5 is not None:
-        save_scan_h5(Path(output_h5), flat)
-        print(f"  saved -> {output_h5}", flush=True)
-    _report(flat, time.perf_counter() - t0)
-    return flat
 
 
 def _report(flat: dict, elapsed: float):
@@ -772,47 +711,8 @@ def _report(flat: dict, elapsed: float):
 # stage 1: cheap "does a REAL axis exist here" probe
 # ---------------------------------------------------------------------------
 
-def stage1_probe(extcur: np.ndarray, cfg: ScanConfig) -> dict:
-    """Cheapest feasibility probe used to map the axis region.
-
-    A one-turn fixed point alone is NOT evidence of a nested column: an
-    island-centre fixed point has one too.  The probe therefore follows
-    ``_pick_axis`` -- it walks each candidate branch out to ``axis_probe_dr``
-    at the nturn=40 tier and reports how far the best branch survived.
-
-    Cost is dominated by the axis enumeration (find_axis_multi_guess scans the
-    whole R window): measured 4.4 s/sample on one core with up to 3 branches,
-    i.e. ~1.5x cheaper than the screening walk per unit depth, and it needs no
-    eps and no long traces.
-    """
-    t0 = time.perf_counter()
-    extcur = np.asarray(extcur, dtype=np.float64)
-    out = {"n_axes": 0, "axis_R": np.nan, "axis_Z": np.nan, "reach": np.nan,
-           "branches": [], "t_total": 0.0}
-    set_extcur(extcur)
-    axes = find_axis_multi_guess(
-        rmin=cfg.rmin, rmax=cfg.rmax, rstep=cfg.rstep, z0=0.0,
-        xtol=1e-6, max_iter=100, delta_r=0.01,
-        axis_z_tol=cfg.axis_z_tol, nphi=cfg.axis_nphi)
-    out["n_axes"] = len(axes)
-    if axes:
-        # when asked, probe every branch so that two usable axes are not hidden
-        want_all = bool(getattr(cfg, "axis_record_branches", False)) and len(axes) > 1
-        ax, reach, axis_rz, ranked = _pick_axis(extcur, axes, cfg,
-                                                all_branches=want_all)
-        if ax is not None:
-            out["axis_R"] = float(axis_rz[0])
-            out["axis_Z"] = float(axis_rz[1])
-            out["reach"] = float(reach)
-        if want_all:
-            out["branches"] = ranked
-    out["t_total"] = time.perf_counter() - t0
-    return out
 
 
-def _probe_indexed(args):
-    idx, point = args
-    return idx, stage1_probe(point, _worker_cfg)
 
 
 def _save_dual_axis(samples: np.ndarray, res: list, cfg: "ScanConfig", path: Path):
@@ -929,81 +829,3 @@ def scan_all_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
           flush=True)
     _report(flat, time.perf_counter() - t0)
     return flat
-
-
-def probe_box(cfg: ScanConfig, bounds: np.ndarray, n_samples: int = 5000,
-              seed: int = 0, processes: int = 0,
-              samples: Optional[np.ndarray] = None,
-              output_h5: Optional[Path] = None,
-              dual_axis_h5: Optional[Path] = None,
-              progress_interval: int = 500) -> dict:
-    """Run stage 1 over a Sobol set (or an explicit sample list) and save it."""
-    bounds = np.asarray(bounds, dtype=np.float64)
-    if samples is None:
-        samples = sample_bounds(bounds, n_samples, seed=seed)
-    else:
-        samples = np.asarray(samples, dtype=np.float64)
-    n = int(samples.shape[0])
-    t0 = time.perf_counter()
-    res: list[dict] = [None] * n
-
-    if processes == 0:
-        print(f"  stage1 probing {n} samples serially", flush=True)
-        _worker_init(cfg)
-        for k in range(n):
-            res[k] = stage1_probe(samples[k], cfg)
-            if progress_interval and (k + 1) % progress_interval == 0:
-                el = time.perf_counter() - t0
-                print(f"    {k + 1}/{n}  {k / max(el, 1e-9):.1f}/s"
-                      f"  {fmt_duration(el)}",
-                      flush=True)
-    else:
-        tasks = [(k, samples[k]) for k in range(n)]
-        print(f"  stage1 probing {n} samples with {processes} workers",
-              flush=True)
-        with multiprocessing.Pool(processes=processes,
-                                  initializer=_worker_init,
-                                  initargs=(cfg,)) as pool:
-            for done, (idx, r) in enumerate(
-                    pool.imap_unordered(_probe_indexed, tasks, chunksize=8),
-                    start=1):
-                res[idx] = r
-                if progress_interval and done % progress_interval == 0:
-                    el = time.perf_counter() - t0
-                    print(f"    {done}/{n}  {done / max(el, 1e-9):.1f}/s"
-                          f"  {fmt_duration(el)}"
-                          f"  ETA {fmt_duration(el / done * (n - done))}",
-                          flush=True)
-
-    scal = {k: np.full(n, np.nan) for k in
-            ("n_axes", "axis_R", "axis_Z", "reach", "t_total")}
-    for i, r in enumerate(res):
-        for k in scal:
-            scal[k][i] = r[k]
-    elapsed = time.perf_counter() - t0
-    n_axis = int(np.sum(scal["n_axes"] > 0))
-    n_real = int(np.sum(scal["reach"] > 0))
-    n_multi = int(np.sum(scal["n_axes"] > 1))
-    print(f"  {n} samples in {fmt_duration(elapsed)}"
-          f" ({elapsed / max(n, 1):.2f} s/sample)"
-          f": any axis {n_axis} ({100.0 * n_axis / max(n, 1):.1f}%),"
-          f" real axis (reach>0) {n_real} ({100.0 * n_real / max(n, 1):.1f}%),"
-          f" multi-axis {n_multi} ({100.0 * n_multi / max(n, 1):.1f}%)",
-          flush=True)
-    if n_axis:
-        v = scal["reach"][np.isfinite(scal["reach"])]
-        print("    reach distribution:", {round(float(x), 2): int((np.abs(v - x) < 1e-9).sum())
-                                          for x in np.unique(v)}, flush=True)
-    if dual_axis_h5 is not None:
-        _save_dual_axis(samples, res, cfg, Path(dual_axis_h5))
-    if output_h5 is not None:
-        path = Path(output_h5)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with h5py.File(path, "w") as f:
-            f.create_dataset("samples", data=samples, compression="gzip")
-            for k, v in scal.items():
-                f.create_dataset(k, data=v, compression="gzip")
-            f.attrs["config"] = json.dumps(asdict(cfg), indent=1)
-            f.attrs["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        print(f"  saved -> {path}", flush=True)
-    return {"samples": samples, "scalars": scal, "config": asdict(cfg)}

@@ -79,6 +79,11 @@ paper/*
 *.swp
 .DS_Store
 
+# Generated presentations / figures
+*.pptx
+figs/
+tests/*.html
+
 # Misc
 .reasonix/
 reasonix.toml
